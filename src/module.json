@@ -8,7 +8,7 @@
     "dsp": "dsp.so",
     "api_version": 1,
     "raw_ui": true,
-    "component_type": "featured",
+    "component_type": "utility",
     "capabilities": {
         "claims_master_knob": true
     }
