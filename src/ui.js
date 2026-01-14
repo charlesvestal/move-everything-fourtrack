@@ -427,12 +427,19 @@ function drawSettingsView() {
 function drawMixerView() {
     clear_screen();
 
+    /* Header with transport info */
+    const transportIcon = transport === "recording" ? "[REC]" :
+                         transport === "playing" ? "[>]" : "[-]";
+    const metroIcon = metronomeEnabled ? "[*]" : "";
+    drawMenuHeader("Mixer", `${metroIcon}${transportIcon} ${formatTime(playheadMs)}`);
+
     /* 4 channels across 128px = 32px each */
     const channelWidth = 32;
     const faderWidth = 16;
-    const faderHeight = 40;
-    const startY = 10;
-    const panY = 56;  /* Y position for pan tick area */
+    const faderHeight = 32;  /* Scaled down to fit below header */
+    const labelY = 14;       /* Track labels below header */
+    const startY = 24;       /* Faders start with 1px gap after labels */
+    const panY = 58;         /* Y position for pan tick area */
 
     for (let i = 0; i < NUM_TRACKS; i++) {
         const channelX = i * channelWidth;
@@ -440,18 +447,18 @@ function drawMixerView() {
         const track = tracks[i];
         const isSelected = i === selectedTrack;
 
-        /* Track number at top */
+        /* Track number with indicators */
         const label = `${i + 1}`;
-        print(channelX + 13, 0, label, 1);
+        print(channelX + 13, labelY, label, 1);
 
         /* Selection/arm/monitor indicators */
         if (track.armed) {
-            print(channelX + 2, 0, "R", 1);
+            print(channelX + 2, labelY, "R", 1);
         } else if (isSelected) {
-            print(channelX + 2, 0, ">", 1);
+            print(channelX + 2, labelY, ">", 1);
         }
         if (track.monitoring) {
-            print(channelX + 8, 0, "M", 1);
+            print(channelX + 8, labelY, "M", 1);
         }
 
         /* Fader background */
@@ -473,7 +480,8 @@ function drawMixerView() {
         fill_rect(panX, panY + 1, 2, 3, 1);
     }
 
-    /* No overlay in mixer view */
+    /* Draw overlay if active */
+    drawOverlay();
 }
 
 function draw() {
@@ -659,36 +667,36 @@ function handleCC(cc, val) {
             }
             return;
         }
+    }
 
-        /* Left/Right = jump by bars, Shift+Left/Right = jump to start/end */
-        if (cc === CC_LEFT && val > 63) {
-            if (shiftHeld) {
-                setParam("goto_start", "1");
-                syncState();
-                showOverlay("Position", "Start");
-            } else {
-                const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
-                setParam("jump_bars", String(-jumpBars));
-                syncState();
-                showOverlay("Jump", `-${jumpBars} bar${jumpBars > 1 ? 's' : ''}`);
-            }
-            needsRedraw = true;
-            return;
+    /* Left/Right = jump by bars, Shift+Left/Right = jump to start/end (works in main and mixer views) */
+    if ((viewMode === VIEW_MAIN || viewMode === VIEW_MIXER) && cc === CC_LEFT && val > 63) {
+        if (shiftHeld) {
+            setParam("goto_start", "1");
+            syncState();
+            showOverlay("Position", "Start");
+        } else {
+            const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
+            setParam("jump_bars", String(-jumpBars));
+            syncState();
+            showOverlay("Jump", `-${jumpBars} bar${jumpBars > 1 ? 's' : ''}`);
         }
-        if (cc === CC_RIGHT && val > 63) {
-            if (shiftHeld) {
-                setParam("goto_end", "1");
-                syncState();
-                showOverlay("Position", "End");
-            } else {
-                const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
-                setParam("jump_bars", String(jumpBars));
-                syncState();
-                showOverlay("Jump", `+${jumpBars} bar${jumpBars > 1 ? 's' : ''}`);
-            }
-            needsRedraw = true;
-            return;
+        needsRedraw = true;
+        return;
+    }
+    if ((viewMode === VIEW_MAIN || viewMode === VIEW_MIXER) && cc === CC_RIGHT && val > 63) {
+        if (shiftHeld) {
+            setParam("goto_end", "1");
+            syncState();
+            showOverlay("Position", "End");
+        } else {
+            const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
+            setParam("jump_bars", String(jumpBars));
+            syncState();
+            showOverlay("Jump", `+${jumpBars} bar${jumpBars > 1 ? 's' : ''}`);
         }
+        needsRedraw = true;
+        return;
     }
 
     /* Up/Down in settings view */
