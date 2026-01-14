@@ -26,9 +26,17 @@ Four Track provides 4 independent audio tracks. Each track can:
 
 The transport controls manage playback and recording:
 
-- **Stopped**: No playback, playhead at start
+- **Stopped**: No playback, playhead at current position
 - **Playing**: All tracks play back simultaneously
 - **Recording**: Armed track records while others play back (overdub mode)
+- **Count-In**: 4-beat count-in before recording starts (when enabled)
+
+### Punch-In/Out
+
+You can start or stop recording while playback continues:
+- While playing, press Record to punch in (start recording armed track)
+- While recording, press Record to punch out (stop recording, continue playback)
+- This allows seamless overdubbing without stopping the transport
 
 ### Signal Chain Integration
 
@@ -120,6 +128,7 @@ Each track has the following adjustable parameters:
 |-----------|-------|---------|-------------|
 | Tempo | 20-300 BPM | 120 | Metronome and timing |
 | Metronome | On/Off | Off | Audible click track |
+| Count-In | On/Off | Off | 4-beat count-in before recording |
 | Loop | On/Off | Off | Loop playback |
 
 ## Workflow Examples
@@ -157,12 +166,11 @@ Each track has the following adjustable parameters:
 - Sample Rate: 44,100 Hz
 - Bit Depth: 16-bit
 - Channels: Stereo per track
-- Default Recording Time: 120 seconds (2 minutes) per track
 - Maximum Recording Time: 300 seconds (5 minutes) per track
 - Total Tracks: 4
 - Simultaneous Playback: All 4 tracks
 - Simultaneous Recording: 1 track (overdub mode)
-- Memory Usage: ~176KB per second per track (~84MB for 4 tracks at default)
+- Memory Usage: ~53 MB per track (~212 MB for all 4 tracks)
 
 ## Troubleshooting
 
@@ -187,9 +195,10 @@ Each track has the following adjustable parameters:
 ## Version History
 
 - v0.1.0: Initial release
-  - 4 audio tracks with 60s each
+  - 4 audio tracks with 5 minutes each
   - Signal Chain patch integration
-  - Transport controls
+  - Transport controls with count-in
+  - Punch-in/out recording while playing
+  - Beat-aligned metronome
   - Mixer with level and pan
-  - Metronome
   - Loop playback

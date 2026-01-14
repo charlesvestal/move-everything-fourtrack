@@ -8,9 +8,11 @@ Four Track is a 4-track audio recorder for your Ableton Move running Move Anythi
 
 With Four Track, you can:
 - Layer up to 4 different instrument tracks
-- Record up to 60 seconds per track
+- Record up to 5 minutes per track
 - Use different synth patches on each track
 - Play back your recordings while adding new parts
+- Use a metronome and count-in for tight timing
+- Punch in/out to fix mistakes without stopping
 - Mix and balance your tracks with levels and panning
 
 ## Before You Begin
@@ -108,14 +110,23 @@ Now you have two tracks playing together!
 
 ## Punch-In Recording
 
-Four Track supports punch-in recording - you can pause, reposition, and continue:
+Four Track supports punch-in recording in two ways:
 
+### Pause and Continue
 1. Record some content on a track
 2. Press **Play** to stop (playhead stays where it is)
 3. Use **Left arrow** to jump to the start
 4. Use **Right arrow** to jump to the end of your recording
 5. Arm the track, enable record mode
 6. Press **Play** to continue recording from that position
+
+### Live Punch In/Out
+1. Start playback with **Play**
+2. When you're ready to record, press **Record** to punch in
+3. Record your part
+4. Press **Record** again to punch out (playback continues)
+
+This is great for fixing a section without stopping the whole transport.
 
 The arrow LEDs turn green when you're at the start or end of the track's content.
 

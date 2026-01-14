@@ -4,10 +4,12 @@ A 4-track audio recorder module for Move Anything on Ableton Move.
 
 ## Features
 
-- **4 Independent Audio Tracks**: Record up to 60 seconds per track
+- **4 Independent Audio Tracks**: Record up to 5 minutes per track
 - **Signal Chain Integration**: Load any Signal Chain patch as your sound source
 - **Live Monitoring**: Play your synth while selecting tracks, record when ready
-- **Punch-In Recording**: Pause, reposition, and continue recording
+- **Count-In Recording**: Optional 4-beat count-in before recording starts
+- **Punch-In/Out**: Start or stop recording while playback continues
+- **Metronome**: Beat-aligned click track for timing
 - **Full Mixer**: Per-track level and pan controls
 - **Knob Macros**: Synth parameters mapped to hardware knobs with overlays
 
@@ -98,8 +100,8 @@ src/
 
 - Sample Rate: 44,100 Hz
 - Bit Depth: 16-bit stereo
-- Max Recording: 60 seconds per track
-- Memory Usage: ~42MB for all 4 tracks
+- Max Recording: 300 seconds (5 minutes) per track
+- Memory Usage: ~212 MB for all 4 tracks
 
 ## License
 

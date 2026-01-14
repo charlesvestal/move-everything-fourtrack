@@ -43,10 +43,18 @@ Each track has:
 
 ### Transport
 
-Three states:
+Four states:
 - `TRANSPORT_STOPPED`: No playback
 - `TRANSPORT_PLAYING`: All tracks play back
 - `TRANSPORT_RECORDING`: Armed track records, others play
+- `TRANSPORT_COUNTIN`: 4-beat count-in before recording starts
+
+### Metronome and Count-In
+
+- Metronome generates beat-aligned clicks during playback/recording
+- Count-in provides 4 beats before recording starts (when enabled)
+- Beat position calculated from playhead: `(playhead + sample) % samples_per_beat`
+- Punch-in/out supported: can toggle recording while playing
 
 ### Signal Chain Integration
 
