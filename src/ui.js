@@ -17,6 +17,10 @@ import { MoveBack, MoveMenu, MovePlay, MoveRec, MoveRecord, MoveShift,
 import { drawMenuHeader, drawMenuList, drawMenuFooter, menuLayoutDefaults,
          showOverlay, tickOverlay, drawOverlay, isOverlayActive, dismissOverlayOnInput } from '../../shared/menu_layout.mjs';
 import { createTextScroller } from '../../shared/text_scroll.mjs';
+import { createValue, createEnum, createToggle, createBack } from '../../shared/menu_items.mjs';
+import { createMenuState, handleMenuInput } from '../../shared/menu_nav.mjs';
+import { createMenuStack } from '../../shared/menu_stack.mjs';
+import { drawStackMenu } from '../../shared/menu_render.mjs';
 
 /* ============================================================================
  * Constants
@@ -73,10 +77,11 @@ const VIEW_MIXER = "mixer";
 const VIEW_SETTINGS = "settings";
 let viewMode = VIEW_MAIN;
 
-/* Settings */
+/* Settings menu state (using shared menu components) */
 const JUMP_OPTIONS = [1, 2, 4, 8];  /* Bars */
 let jumpBarsIndex = 0;  /* Index into JUMP_OPTIONS, default 1 bar */
-let settingsSelectedItem = 0;  /* 0=tempo, 1=jump, 2=metronome */
+let settingsMenuState = null;
+let settingsMenuStack = null;
 
 /* Track state (synced from DSP) */
 let tracks = [];
@@ -100,6 +105,8 @@ let transport = "stopped";
 let recordEnabled = false;  /* Record mode - when true, play will start recording */
 let tempo = 120;
 let metronomeEnabled = false;
+let countinEnabled = false;
+let midiRouting = "selected";  /* "selected" or "split" */
 let loopEnabled = false;
 let playheadMs = 0;
 
@@ -139,6 +146,8 @@ function syncState() {
     selectedTrack = parseInt(getParam("selected_track") || "0");
     tempo = parseInt(getParam("tempo") || "120");
     metronomeEnabled = getParam("metronome") === "1";
+    countinEnabled = getParam("countin") === "1";
+    midiRouting = getParam("midi_routing") || "selected";
     loopEnabled = getParam("loop_enabled") === "1";
     playheadMs = parseInt(getParam("playhead") || "0");
 
@@ -231,8 +240,8 @@ function updateLEDs() {
         setButtonLED(CC_PLAY, White);
     }
 
-    /* Record button (CC_REC) - white when off, red when record mode enabled */
-    if (recordEnabled || transport === "recording") {
+    /* Record button (CC_REC) - red when recording, or when stopped with record-ready */
+    if (transport === "recording" || (transport === "stopped" && recordEnabled)) {
         setButtonLED(CC_REC, BrightRed);
     } else {
         setButtonLED(CC_REC, White);
@@ -353,16 +362,12 @@ function drawMainView() {
         } else if (actualRow === ROW_SETTINGS) {
             /* Settings row */
             const isSelected = selectedRow === ROW_SETTINGS;
-            const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
-            const settingsInfo = `${tempo}bpm ${jumpBars}bar`;
 
             if (isSelected) {
                 fill_rect(0, y, SCREEN_WIDTH, trackHeight, 1);
                 print(2, y + 2, "> Settings", 0);
-                print(SCREEN_WIDTH - settingsInfo.length * 6 - 2, y + 2, settingsInfo, 0);
             } else {
                 print(2, y + 2, "  Settings", 1);
-                print(SCREEN_WIDTH - settingsInfo.length * 6 - 2, y + 2, settingsInfo, 1);
             }
         }
     }
@@ -391,35 +396,84 @@ function drawPatchView() {
     drawOverlay();
 }
 
+/* Build settings menu items using shared menu item creators */
+function getSettingsItems() {
+    return [
+        createValue('Tempo', {
+            get: () => tempo,
+            set: (v) => {
+                setParam("tempo", String(v));
+                syncState();
+            },
+            min: 20,
+            max: 300,
+            step: 5,
+            fineStep: 1,
+            format: (v) => `${v} BPM`
+        }),
+        createEnum('Jump', {
+            get: () => JUMP_OPTIONS[jumpBarsIndex],
+            set: (v) => {
+                jumpBarsIndex = JUMP_OPTIONS.indexOf(v);
+                if (jumpBarsIndex < 0) jumpBarsIndex = 0;
+            },
+            options: JUMP_OPTIONS,
+            format: (v) => `${v} bar${v > 1 ? 's' : ''}`
+        }),
+        createToggle('Metronome', {
+            get: () => metronomeEnabled,
+            set: (v) => {
+                setParam("metronome", v ? "1" : "0");
+                syncState();
+            }
+        }),
+        createToggle('Count-in', {
+            get: () => countinEnabled,
+            set: (v) => {
+                setParam("countin", v ? "1" : "0");
+                syncState();
+            }
+        }),
+        createEnum('Ext MIDI', {
+            get: () => midiRouting,
+            set: (v) => {
+                setParam("midi_routing", v);
+                syncState();
+            },
+            options: ['selected', 'split'],
+            format: (v) => v === 'split' ? 'Split Ch' : 'Selected'
+        }),
+        createBack()
+    ];
+}
+
+/* Initialize settings menu */
+function initSettingsMenu() {
+    settingsMenuState = createMenuState();
+    settingsMenuStack = createMenuStack();
+    settingsMenuStack.push({
+        title: 'Settings',
+        items: getSettingsItems(),
+        selectedIndex: 0
+    });
+}
+
 function drawSettingsView() {
     clear_screen();
-    drawMenuHeader("Settings", "");
 
-    const items = [
-        { label: "Tempo", value: `${tempo} BPM` },
-        { label: "Jump", value: `${JUMP_OPTIONS[jumpBarsIndex]} bar${JUMP_OPTIONS[jumpBarsIndex] > 1 ? 's' : ''}` },
-        { label: "Metronome", value: metronomeEnabled ? "On" : "Off" }
-    ];
-
-    const itemHeight = 14;
-    const startY = 16;
-
-    for (let i = 0; i < items.length; i++) {
-        const y = startY + i * itemHeight;
-        const isSelected = i === settingsSelectedItem;
-
-        if (isSelected) {
-            fill_rect(0, y, SCREEN_WIDTH, itemHeight, 1);
-            print(4, y + 3, items[i].label, 0);
-            print(SCREEN_WIDTH - items[i].value.length * 6 - 4, y + 3, items[i].value, 0);
-        } else {
-            print(4, y + 3, items[i].label, 1);
-            print(SCREEN_WIDTH - items[i].value.length * 6 - 4, y + 3, items[i].value, 1);
-        }
+    if (!settingsMenuStack || settingsMenuStack.depth() === 0) {
+        initSettingsMenu();
     }
 
-    /* Instructions */
-    print(4, 58, "Jog:adjust  Back:done", 1);
+    const footer = settingsMenuState.editing
+        ? 'Jog:Change Clk:Save'
+        : 'Jog:Scroll Clk:Edit';
+
+    drawStackMenu({
+        stack: settingsMenuStack,
+        state: settingsMenuState,
+        footer
+    });
 
     drawOverlay();
 }
@@ -532,9 +586,28 @@ function handleCC(cc, val) {
         return;
     }
 
-    /* Record button (CC_REC) - toggle record mode */
+    /* Record button (CC_REC) - punch in/out while playing, or toggle record mode when stopped */
     if (cc === CC_REC && val > 63) {
-        recordEnabled = !recordEnabled;
+        if (transport === "playing") {
+            /* Punch in - start recording while playing */
+            const anyArmed = tracks.some(t => t.armed);
+            if (anyArmed) {
+                setParam("transport", "record");
+                syncState();
+                showOverlay("REC", "Punch In");
+            } else {
+                showOverlay("REC", "No Track Armed");
+            }
+        } else if (transport === "recording") {
+            /* Punch out - stop recording, continue playing */
+            setParam("transport", "play");
+            syncState();
+            showOverlay("REC", "Punch Out");
+        } else {
+            /* Stopped - toggle record mode for next play */
+            recordEnabled = !recordEnabled;
+            showOverlay("REC", recordEnabled ? "Rec Ready" : "Rec Off");
+        }
         needsRedraw = true;
         return;
     }
@@ -543,7 +616,7 @@ function handleCC(cc, val) {
         /* Toggle arm on selected track */
         setParam("toggle_arm", String(selectedTrack));
         syncState();
-        showOverlay(`T${selectedTrack + 1}`, tracks[selectedTrack].armed ? "Disarmed" : "Armed");
+        showOverlay(`T${selectedTrack + 1}`, tracks[selectedTrack].armed ? "Armed" : "Disarmed");
         needsRedraw = true;
         return;
     }
@@ -557,7 +630,7 @@ function handleCC(cc, val) {
                     /* Shift+Track = toggle arm on that track */
                     setParam("toggle_arm", String(i));
                     syncState();
-                    showOverlay(`T${i + 1}`, tracks[i].armed ? "Disarmed" : "Armed");
+                    showOverlay(`T${i + 1}`, tracks[i].armed ? "Armed" : "Disarmed");
                 } else if (i !== selectedTrack) {
                     /* Switch to different track = select it and return to main view */
                     setParam("select_track", String(i));
@@ -591,7 +664,7 @@ function handleCC(cc, val) {
     if (cc === CC_CAPTURE && val > 63) {
         setParam("toggle_monitoring", String(selectedTrack));
         syncState();
-        showOverlay(`T${selectedTrack + 1} Monitor`, tracks[selectedTrack].monitoring ? "Off" : "On");
+        showOverlay(`T${selectedTrack + 1} Monitor`, tracks[selectedTrack].monitoring ? "On" : "Off");
         needsRedraw = true;
         return;
     }
@@ -620,7 +693,17 @@ function handleCC(cc, val) {
     /* Navigation */
     if (cc === CC_BACK && val > 63) {
         if (viewMode === VIEW_SETTINGS) {
+            /* Let shared menu handle back (cancel edit or exit) */
+            if (settingsMenuState && settingsMenuState.editing) {
+                /* Cancel edit mode */
+                settingsMenuState.editing = false;
+                settingsMenuState.editValue = null;
+                needsRedraw = true;
+                return;
+            }
+            /* Exit settings */
             viewMode = VIEW_MAIN;
+            settingsMenuStack = null;  /* Reset for next time */
         } else if (viewMode !== VIEW_MAIN) {
             viewMode = VIEW_MAIN;
         } else {
@@ -699,49 +782,44 @@ function handleCC(cc, val) {
         return;
     }
 
-    /* Up/Down in settings view */
+    /* Settings view - delegate to shared menu components */
     if (viewMode === VIEW_SETTINGS) {
-        if (cc === CC_UP && val > 63) {
-            if (settingsSelectedItem > 0) {
-                settingsSelectedItem--;
-                needsRedraw = true;
-            }
+        if (!settingsMenuStack || settingsMenuStack.depth() === 0) {
+            initSettingsMenu();
+        }
+        const current = settingsMenuStack.current();
+        const items = current ? current.items : getSettingsItems();
+
+        const result = handleMenuInput({
+            cc,
+            value: val,
+            items,
+            state: settingsMenuState,
+            stack: settingsMenuStack,
+            shiftHeld
+        });
+
+        /* Check if user selected [Back] item */
+        const item = items[settingsMenuState.selectedIndex];
+        if (item && item.type === 'back' && cc === CC_JOG_CLICK && val > 63) {
+            viewMode = VIEW_MAIN;
+            settingsMenuStack = null;
+            needsRedraw = true;
             return;
         }
-        if (cc === CC_DOWN && val > 63) {
-            if (settingsSelectedItem < 2) {
-                settingsSelectedItem++;
-                needsRedraw = true;
-            }
-            return;
+
+        if (result.needsRedraw) {
+            needsRedraw = true;
         }
+        return;
     }
 
-    /* Jog wheel */
+    /* Jog wheel (settings handled above) */
     if (cc === CC_JOG) {
         const delta = val < 64 ? val : val - 128;
 
         if (viewMode === VIEW_PATCH && patches.length > 0) {
             selectedPatch = (selectedPatch + delta + patches.length) % patches.length;
-            needsRedraw = true;
-        } else if (viewMode === VIEW_SETTINGS) {
-            /* Jog adjusts selected setting */
-            if (settingsSelectedItem === 0) {
-                /* Tempo: adjust by 1 BPM */
-                const newTempo = Math.max(20, Math.min(300, tempo + delta));
-                setParam("tempo", String(newTempo));
-                syncState();
-                showOverlay("Tempo", `${newTempo} BPM`);
-            } else if (settingsSelectedItem === 1) {
-                /* Jump increment: cycle through options */
-                jumpBarsIndex = (jumpBarsIndex + (delta > 0 ? 1 : -1) + JUMP_OPTIONS.length) % JUMP_OPTIONS.length;
-                showOverlay("Jump", `${JUMP_OPTIONS[jumpBarsIndex]} bars`);
-            } else if (settingsSelectedItem === 2) {
-                /* Metronome: toggle */
-                setParam("metronome", metronomeEnabled ? "0" : "1");
-                syncState();
-                showOverlay("Metronome", metronomeEnabled ? "Off" : "On");
-            }
             needsRedraw = true;
         } else if (viewMode === VIEW_MAIN) {
             /* Jog = scroll through rows (tracks + settings) */
@@ -759,22 +837,19 @@ function handleCC(cc, val) {
         return;
     }
 
-    /* Jog click */
+    /* Jog click (settings handled above) */
     if (cc === CC_JOG_CLICK && val > 63) {
         if (viewMode === VIEW_MAIN) {
             if (selectedRow === ROW_SETTINGS) {
                 /* Open settings view */
                 viewMode = VIEW_SETTINGS;
-                settingsSelectedItem = 0;
+                initSettingsMenu();
             } else {
                 /* Open patch browser for selected track */
                 loadPatches();
                 viewMode = VIEW_PATCH;
             }
             needsRedraw = true;
-        } else if (viewMode === VIEW_SETTINGS) {
-            /* In settings view: jog click does nothing or could confirm */
-            return;
         } else if (viewMode === VIEW_PATCH && patches.length > 0) {
             /* In patch view: load the selected patch and return to main */
             const patchIndex = patches[selectedPatch].index;
@@ -885,15 +960,16 @@ function onMidiMessage(msg, source) {
     /* Filter capacitive touch */
     if (isCapacitiveTouchMessage(msg)) return;
 
-    /* Dismiss overlay on user interaction */
-    if (dismissOverlayOnInput(msg)) {
-        needsRedraw = true;
-        return;  /* Consume this input just for dismissing */
-    }
-
     const status = msg[0] & 0xF0;
     const data1 = msg[1];
     const data2 = msg[2];
+
+    /* Dismiss overlay on user interaction, but NOT for knob turns (they update the overlay)
+     * Don't return early - let the input be processed (it may show a new overlay) */
+    const isKnobCC = (status === 0xB0 && data1 >= 71 && data1 <= 79);
+    if (!isKnobCC) {
+        dismissOverlayOnInput(msg);
+    }
 
     if (status === 0xB0) {
         handleCC(data1, data2);

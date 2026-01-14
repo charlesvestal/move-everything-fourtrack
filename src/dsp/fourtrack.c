@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 
 #include "plugin_api_v1.h"
+/* Note: Audio FX are now handled by chain instances, not directly by fourtrack */
 
 /* ============================================================================
  * Constants
@@ -40,6 +41,7 @@ static int g_record_seconds = DEFAULT_RECORD_SECONDS;
 #define MAX_PATH_LEN 512
 #define MAX_NAME_LEN 64
 #define MAX_PATCHES 64
+#define MAX_AUDIO_FX 4   /* Max audio FX per track */
 
 /* ============================================================================
  * Types
@@ -82,13 +84,12 @@ typedef struct {
     int monitoring;            /* Monitoring live input */
     char patch_name[MAX_NAME_LEN];  /* Associated chain patch name */
     char patch_path[MAX_PATH_LEN];  /* Full path to patch file */
-    /* Per-track synth */
-    void *synth_handle;
-    plugin_api_v1_t *synth_plugin;   /* v1 API (NULL if v2) */
-    plugin_api_v2_t *synth_plugin_v2; /* v2 API (NULL if v1) */
-    void *synth_instance;            /* v2 instance pointer (NULL if v1) */
-    char synth_module[MAX_NAME_LEN];
-    /* Per-track knob mappings */
+    /* Per-track chain instance (includes synth + audio FX + MIDI FX) */
+    void *chain_handle;              /* dlopen handle for chain module */
+    plugin_api_v2_t *chain_plugin;   /* chain v2 API */
+    void *chain_instance;            /* chain instance pointer */
+    int chain_patch_idx;             /* Current patch index within chain */
+    /* Per-track knob mappings - handled by chain, but we cache for UI */
     knob_mapping_t knob_mappings[MAX_KNOB_MAPPINGS];
     int knob_mapping_count;
 } track_t;
@@ -103,7 +104,8 @@ typedef struct {
 typedef enum {
     TRANSPORT_STOPPED,
     TRANSPORT_PLAYING,
-    TRANSPORT_RECORDING
+    TRANSPORT_RECORDING,
+    TRANSPORT_COUNTIN      /* Count-in before recording */
 } transport_state_t;
 
 /* ============================================================================
@@ -128,11 +130,15 @@ static int g_loop_enabled = 0;            /* Loop mode enabled */
 static patch_info_t g_patches[MAX_PATCHES];
 static int g_patch_count = 0;
 
-/* Metronome */
+/* Metronome - beat position derived directly from playhead */
 static int g_metronome_enabled = 0;
 static int g_tempo_bpm = 120;
 static int g_samples_per_beat = 0;
-static int g_metronome_counter = 0;
+
+/* Count-in - uses separate counter since playhead doesn't move during count-in */
+static int g_countin_enabled = 0;
+static int g_countin_counter = 0;          /* Counts up during count-in (samples) */
+static int g_countin_total_samples = 0;    /* Total samples for count-in (4 beats) */
 
 /* Project file */
 static char g_project_path[MAX_PATH_LEN];
@@ -140,6 +146,14 @@ static int g_project_loaded = 0;
 
 /* Solo tracking */
 static int g_any_solo = 0;
+
+/* MIDI routing mode */
+typedef enum {
+    MIDI_ROUTING_SELECTED = 0,   /* All MIDI goes to selected track (default) */
+    MIDI_ROUTING_SPLIT_CHANNELS  /* External MIDI split by channel: ch1→track1, etc. */
+} midi_routing_mode_t;
+
+static midi_routing_mode_t g_midi_routing_mode = MIDI_ROUTING_SELECTED;
 
 /* Last error message (for UI display) */
 static char g_last_error[256] = "";
@@ -185,20 +199,6 @@ static int subplugin_midi_send_external(const uint8_t *msg, int len) {
     return 0;
 }
 
-/* Find which track (if any) already has this module loaded as v1 */
-static int find_v1_module_in_use(const char *module_name, int exclude_track) {
-    for (int i = 0; i < NUM_TRACKS; i++) {
-        if (i == exclude_track) continue;
-        /* Only count v1 plugins (v2 allows multiple instances) */
-        if (g_tracks[i].synth_plugin != NULL && g_tracks[i].synth_plugin_v2 == NULL) {
-            if (strcmp(g_tracks[i].synth_module, module_name) == 0) {
-                return i;
-            }
-        }
-    }
-    return -1;
-}
-
 /* Get track index from track pointer */
 static int get_track_index(track_t *track) {
     for (int i = 0; i < NUM_TRACKS; i++) {
@@ -207,145 +207,117 @@ static int get_track_index(track_t *track) {
     return -1;
 }
 
-static int load_synth_for_track(track_t *track, const char *module_path) {
+/* Load chain module for a track - chain handles synth + audio FX + MIDI FX */
+static int load_chain_for_track(track_t *track) {
     char msg[256];
-    char dsp_path[MAX_PATH_LEN];
+    char chain_path[MAX_PATH_LEN];
     int track_idx = get_track_index(track);
 
-    /* Build path to dsp.so */
-    snprintf(dsp_path, sizeof(dsp_path), "%s/dsp.so", module_path);
-
-    snprintf(msg, sizeof(msg), "Loading synth from: %s", dsp_path);
-    ft_log(msg);
-
-    /* Open the shared library */
-    track->synth_handle = dlopen(dsp_path, RTLD_NOW | RTLD_LOCAL);
-    if (!track->synth_handle) {
-        snprintf(msg, sizeof(msg), "dlopen failed: %s", dlerror());
-        ft_log(msg);
-        return -1;
-    }
-
-    /* Extract module name from path for duplicate checking */
-    char module_name[MAX_NAME_LEN] = "";
-    const char *last_slash = strrchr(module_path, '/');
+    /* Build path to chain module dsp.so */
+    strncpy(chain_path, g_module_dir, sizeof(chain_path) - 1);
+    char *last_slash = strrchr(chain_path, '/');
     if (last_slash) {
-        strncpy(module_name, last_slash + 1, MAX_NAME_LEN - 1);
+        snprintf(last_slash + 1, sizeof(chain_path) - (last_slash - chain_path) - 1,
+                 "chain/dsp.so");
     } else {
-        strncpy(module_name, module_path, MAX_NAME_LEN - 1);
+        snprintf(chain_path, sizeof(chain_path), "modules/chain/dsp.so");
     }
 
-    /* Try v2 first - supports multiple instances */
-    move_plugin_init_v2_fn init_v2 = (move_plugin_init_v2_fn)dlsym(track->synth_handle, MOVE_PLUGIN_INIT_V2_SYMBOL);
-    if (init_v2) {
-        snprintf(msg, sizeof(msg), "Plugin '%s' supports v2 API (multi-instance)", module_name);
+    snprintf(msg, sizeof(msg), "Loading chain from: %s", chain_path);
+    ft_log(msg);
+
+    /* Open the chain module */
+    track->chain_handle = dlopen(chain_path, RTLD_NOW | RTLD_LOCAL);
+    if (!track->chain_handle) {
+        snprintf(msg, sizeof(msg), "dlopen chain failed: %s", dlerror());
         ft_log(msg);
-
-        track->synth_plugin_v2 = init_v2(&g_subplugin_host_api);
-        if (!track->synth_plugin_v2) {
-            ft_log("Synth plugin v2 init returned NULL");
-            dlclose(track->synth_handle);
-            track->synth_handle = NULL;
-            return -1;
-        }
-
-        /* Create instance */
-        track->synth_instance = track->synth_plugin_v2->create_instance(module_path, NULL);
-        if (!track->synth_instance) {
-            ft_log("Synth create_instance returned NULL");
-            dlclose(track->synth_handle);
-            track->synth_handle = NULL;
-            track->synth_plugin_v2 = NULL;
-            return -1;
-        }
-
-        track->synth_plugin = NULL;  /* Not using v1 */
-        snprintf(msg, sizeof(msg), "Synth v2 loaded successfully (track %d)", track_idx + 1);
-        ft_log(msg);
-        return 0;
-    }
-
-    /* Fall back to v1 - single instance only */
-    move_plugin_init_v1_fn init_v1 = (move_plugin_init_v1_fn)dlsym(track->synth_handle, MOVE_PLUGIN_INIT_SYMBOL);
-    if (!init_v1) {
-        snprintf(msg, sizeof(msg), "dlsym failed (no v1 or v2 init): %s", dlerror());
-        ft_log(msg);
-        dlclose(track->synth_handle);
-        track->synth_handle = NULL;
         return -1;
     }
 
-    /* v1 plugin: check if already loaded on another track */
-    int existing_track = find_v1_module_in_use(module_name, track_idx);
-    if (existing_track >= 0) {
-        snprintf(msg, sizeof(msg),
-                 "ERROR: v1 plugin '%s' already in use on track %d (upgrade plugin for multi-instance)",
-                 module_name, existing_track + 1);
-        ft_log(msg);
-        dlclose(track->synth_handle);
-        track->synth_handle = NULL;
-        return -2;  /* Special error code for duplicate v1 */
-    }
-
-    snprintf(msg, sizeof(msg), "Plugin '%s' uses v1 API (single instance)", module_name);
-    ft_log(msg);
-
-    /* Initialize v1 sub-plugin */
-    track->synth_plugin = init_v1(&g_subplugin_host_api);
-    if (!track->synth_plugin) {
-        ft_log("Synth plugin init returned NULL");
-        dlclose(track->synth_handle);
-        track->synth_handle = NULL;
+    /* Chain must support v2 API for multi-instance */
+    move_plugin_init_v2_fn init_v2 = (move_plugin_init_v2_fn)dlsym(track->chain_handle, MOVE_PLUGIN_INIT_V2_SYMBOL);
+    if (!init_v2) {
+        ft_log("Chain module does not support v2 API - cannot use multi-instance");
+        dlclose(track->chain_handle);
+        track->chain_handle = NULL;
         return -1;
     }
 
-    track->synth_plugin_v2 = NULL;  /* Not using v2 */
-    track->synth_instance = NULL;
-
-    /* Call on_load */
-    if (track->synth_plugin->on_load) {
-        int ret = track->synth_plugin->on_load(module_path, NULL);
-        if (ret != 0) {
-            snprintf(msg, sizeof(msg), "Synth on_load failed: %d", ret);
-            ft_log(msg);
-            dlclose(track->synth_handle);
-            track->synth_handle = NULL;
-            track->synth_plugin = NULL;
-            return -1;
-        }
+    track->chain_plugin = init_v2(&g_subplugin_host_api);
+    if (!track->chain_plugin) {
+        ft_log("Chain plugin v2 init returned NULL");
+        dlclose(track->chain_handle);
+        track->chain_handle = NULL;
+        return -1;
     }
 
-    snprintf(msg, sizeof(msg), "Synth v1 loaded successfully (track %d)", track_idx + 1);
+    /* Build path to chain module directory */
+    char chain_dir[MAX_PATH_LEN];
+    strncpy(chain_dir, g_module_dir, sizeof(chain_dir) - 1);
+    last_slash = strrchr(chain_dir, '/');
+    if (last_slash) {
+        snprintf(last_slash + 1, sizeof(chain_dir) - (last_slash - chain_dir) - 1, "chain");
+    }
+
+    /* Create chain instance */
+    track->chain_instance = track->chain_plugin->create_instance(chain_dir, NULL);
+    if (!track->chain_instance) {
+        ft_log("Chain create_instance returned NULL");
+        dlclose(track->chain_handle);
+        track->chain_handle = NULL;
+        track->chain_plugin = NULL;
+        return -1;
+    }
+
+    track->chain_patch_idx = -1;
+    snprintf(msg, sizeof(msg), "Chain instance created for track %d", track_idx + 1);
     ft_log(msg);
+
     return 0;
 }
 
-static void unload_synth_for_track(track_t *track) {
-    /* v2: destroy instance */
-    if (track->synth_plugin_v2 && track->synth_instance) {
-        if (track->synth_plugin_v2->destroy_instance) {
-            track->synth_plugin_v2->destroy_instance(track->synth_instance);
+/* Unload chain for a track */
+static void unload_chain_for_track(track_t *track) {
+    if (track->chain_plugin && track->chain_instance) {
+        if (track->chain_plugin->destroy_instance) {
+            track->chain_plugin->destroy_instance(track->chain_instance);
         }
-        track->synth_instance = NULL;
-        track->synth_plugin_v2 = NULL;
-    }
-    /* v1: call on_unload */
-    else if (track->synth_plugin && track->synth_plugin->on_unload) {
-        track->synth_plugin->on_unload();
+        track->chain_instance = NULL;
     }
 
-    if (track->synth_handle) {
-        dlclose(track->synth_handle);
+    if (track->chain_handle) {
+        dlclose(track->chain_handle);
     }
-    track->synth_handle = NULL;
-    track->synth_plugin = NULL;
-    track->synth_plugin_v2 = NULL;
-    track->synth_instance = NULL;
-    track->synth_module[0] = '\0';
+    track->chain_handle = NULL;
+    track->chain_plugin = NULL;
+    track->chain_patch_idx = -1;
+}
+
+/* Load a patch into a track's chain instance */
+static int load_patch_for_track(track_t *track, int patch_idx) {
+    char msg[256];
+    int track_idx = get_track_index(track);
+
+    if (!track->chain_plugin || !track->chain_instance) {
+        ft_log("Cannot load patch - no chain instance");
+        return -1;
+    }
+
+    /* Tell chain to load the patch */
+    char patch_str[16];
+    snprintf(patch_str, sizeof(patch_str), "%d", patch_idx);
+    track->chain_plugin->set_param(track->chain_instance, "load_patch", patch_str);
+
+    track->chain_patch_idx = patch_idx;
+
+    snprintf(msg, sizeof(msg), "Track %d: loaded patch index %d", track_idx + 1, patch_idx);
+    ft_log(msg);
+
+    return 0;
 }
 
 /* Forward declarations */
-static void synth_panic_for_track(track_t *track);
+static void chain_panic_for_track(track_t *track);
 
 /* ============================================================================
  * JSON Parsing Helpers
@@ -614,105 +586,59 @@ static void parse_knob_mappings(track_t *track, const char *json) {
     ft_log(msg);
 }
 
-/* Parse a chain patch file and load the synth */
+/* Load a chain patch for a track - using chain instance v2 API */
 static int load_chain_patch_for_track(track_t *track, const char *patch_path) {
     char msg[256];
+    int track_idx = get_track_index(track);
+    (void)patch_path;  /* Patch path not used directly - chain handles it by index */
 
-    FILE *f = fopen(patch_path, "r");
-    if (!f) {
-        snprintf(msg, sizeof(msg), "Failed to open patch: %s", patch_path);
+    /* Ensure chain instance exists */
+    if (!track->chain_instance || !track->chain_plugin) {
+        ft_log("Cannot load patch - no chain instance");
+        return -1;
+    }
+
+    /* Chain instance has already scanned patches - find the patch index that matches
+     * our patch name, then tell chain to load it by index.
+     * First, query how many patches the chain has */
+    char count_buf[16];
+    if (track->chain_plugin->get_param(track->chain_instance, "patch_count", count_buf, sizeof(count_buf)) < 0) {
+        ft_log("Failed to get patch count from chain");
+        return -1;
+    }
+    int patch_count = atoi(count_buf);
+
+    /* Find the patch by name */
+    int found_idx = -1;
+    for (int i = 0; i < patch_count; i++) {
+        char key[32], name_buf[MAX_NAME_LEN];
+        snprintf(key, sizeof(key), "patch_name_%d", i);
+        if (track->chain_plugin->get_param(track->chain_instance, key, name_buf, sizeof(name_buf)) >= 0) {
+            if (strcmp(name_buf, track->patch_name) == 0) {
+                found_idx = i;
+                break;
+            }
+        }
+    }
+
+    if (found_idx < 0) {
+        snprintf(msg, sizeof(msg), "Patch '%s' not found in chain", track->patch_name);
         ft_log(msg);
         return -1;
     }
 
-    /* Read entire file */
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    /* Tell chain to load the patch */
+    char idx_str[16];
+    snprintf(idx_str, sizeof(idx_str), "%d", found_idx);
+    track->chain_plugin->set_param(track->chain_instance, "load_patch", idx_str);
+    track->chain_patch_idx = found_idx;
 
-    if (size > 4096) {
-        fclose(f);
-        ft_log("Patch file too large");
-        return -1;
-    }
-
-    char *json = malloc(size + 1);
-    if (!json) {
-        fclose(f);
-        return -1;
-    }
-
-    fread(json, 1, size, f);
-    json[size] = '\0';
-    fclose(f);
-
-    /* Extract synth module name */
-    char synth_module[MAX_NAME_LEN] = "";
-    if (json_get_string_in_section(json, "synth", "module", synth_module, MAX_NAME_LEN) != 0) {
-        /* Try old format or default */
-        if (json_get_string(json, "synth", synth_module, MAX_NAME_LEN) != 0) {
-            strcpy(synth_module, "sf2");  /* Default */
-        }
-    }
-
-    /* Extract preset number */
-    int preset = 0;
-    json_get_int_in_section(json, "synth", "preset", &preset);
-
-    snprintf(msg, sizeof(msg), "Patch synth: %s, preset: %d", synth_module, preset);
+    snprintf(msg, sizeof(msg), "Track %d: loaded chain patch '%s' (index %d)",
+             track_idx + 1, track->patch_name, found_idx);
     ft_log(msg);
 
-    /* Parse knob mappings before freeing JSON */
-    parse_knob_mappings(track, json);
-
-    free(json);
-
-    /* Build path to synth module */
-    char synth_path[MAX_PATH_LEN];
-
-    /* Check if it's an internal sound generator (linein) */
-    if (strcmp(synth_module, "linein") == 0) {
-        /* Internal - in chain/sound_generators/ */
-        strncpy(synth_path, g_module_dir, sizeof(synth_path) - 1);
-        char *last_slash = strrchr(synth_path, '/');
-        if (last_slash) {
-            snprintf(last_slash + 1, sizeof(synth_path) - (last_slash - synth_path) - 1,
-                     "chain/sound_generators/%s", synth_module);
-        }
-    } else {
-        /* External module (sf2, dx7, etc.) - in modules/ */
-        strncpy(synth_path, g_module_dir, sizeof(synth_path) - 1);
-        char *last_slash = strrchr(synth_path, '/');
-        if (last_slash) {
-            snprintf(last_slash + 1, sizeof(synth_path) - (last_slash - synth_path) - 1,
-                     "%s", synth_module);
-        }
-    }
-
-    snprintf(msg, sizeof(msg), "Loading synth from: %s", synth_path);
-    ft_log(msg);
-
-    /* Unload current synth for this track and load new one */
-    synth_panic_for_track(track);
-    unload_synth_for_track(track);
-
-    int load_result = load_synth_for_track(track, synth_path);
-    if (load_result != 0) {
-        snprintf(msg, sizeof(msg), "Failed to load synth: %s", synth_module);
-        ft_log(msg);
-        return load_result;  /* Propagate error code (-2 for duplicate v1) */
-    }
-
-    strncpy(track->synth_module, synth_module, MAX_NAME_LEN - 1);
-
-    /* Set preset */
-    char preset_str[16];
-    snprintf(preset_str, sizeof(preset_str), "%d", preset);
-    if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->set_param) {
-        track->synth_plugin_v2->set_param(track->synth_instance, "preset", preset_str);
-    } else if (track->synth_plugin && track->synth_plugin->set_param) {
-        track->synth_plugin->set_param("preset", preset_str);
-    }
+    /* Knob mappings are now handled by the chain instance */
+    track->knob_mapping_count = 0;  /* We don't cache them anymore */
 
     return 0;
 }
@@ -785,6 +711,20 @@ static void scan_patches(void) {
 
     closedir(dir);
 
+    /* Sort patches alphabetically by name */
+    if (g_patch_count > 1) {
+        /* Simple qsort comparison function inline via a static helper */
+        for (int i = 0; i < g_patch_count - 1; i++) {
+            for (int j = i + 1; j < g_patch_count; j++) {
+                if (strcasecmp(g_patches[i].name, g_patches[j].name) > 0) {
+                    patch_info_t tmp = g_patches[i];
+                    g_patches[i] = g_patches[j];
+                    g_patches[j] = tmp;
+                }
+            }
+        }
+    }
+
     snprintf(msg, sizeof(msg), "Found %d patches", g_patch_count);
     ft_log(msg);
 }
@@ -812,9 +752,16 @@ static void load_default_patches(void) {
     ft_log(msg);
 
     for (int i = 0; i < NUM_TRACKS; i++) {
+        /* First create chain instance for this track */
+        if (load_chain_for_track(&g_tracks[i]) != 0) {
+            snprintf(msg, sizeof(msg), "Track %d: failed to create chain instance", i + 1);
+            ft_log(msg);
+            continue;
+        }
+
         strncpy(g_tracks[i].patch_name, g_patches[linein_idx].name, MAX_NAME_LEN - 1);
         strncpy(g_tracks[i].patch_path, g_patches[linein_idx].path, MAX_PATH_LEN - 1);
-        /* Load synth for each track */
+        /* Load chain patch for this track */
         if (load_chain_patch_for_track(&g_tracks[i], g_patches[linein_idx].path) == 0) {
             snprintf(msg, sizeof(msg), "Track %d: Line In loaded", i + 1);
             ft_log(msg);
@@ -844,22 +791,21 @@ static void init_tracks(void) {
         g_tracks[i].muted = 0;
         g_tracks[i].solo = 0;
         g_tracks[i].armed = 0;
-        g_tracks[i].monitoring = 1;  /* Monitoring on by default */
+        g_tracks[i].monitoring = (i == 0) ? 1 : 0;  /* Only track 1 has monitoring on by default */
         g_tracks[i].patch_name[0] = '\0';
         g_tracks[i].patch_path[0] = '\0';
-        g_tracks[i].synth_handle = NULL;
-        g_tracks[i].synth_plugin = NULL;
-        g_tracks[i].synth_plugin_v2 = NULL;
-        g_tracks[i].synth_instance = NULL;
-        g_tracks[i].synth_module[0] = '\0';
+        g_tracks[i].chain_handle = NULL;
+        g_tracks[i].chain_plugin = NULL;
+        g_tracks[i].chain_instance = NULL;
+        g_tracks[i].chain_patch_idx = -1;
         g_tracks[i].knob_mapping_count = 0;
     }
 }
 
 static void free_tracks(void) {
     for (int i = 0; i < NUM_TRACKS; i++) {
-        /* Unload synth for this track */
-        unload_synth_for_track(&g_tracks[i]);
+        /* Unload chain for this track */
+        unload_chain_for_track(&g_tracks[i]);
         if (g_tracks[i].buffer) {
             free(g_tracks[i].buffer);
             g_tracks[i].buffer = NULL;
@@ -903,15 +849,44 @@ static void start_recording(void) {
         return;
     }
 
-    /* Clear all armed tracks we're about to record to */
-    for (int i = 0; i < NUM_TRACKS; i++) {
-        if (g_tracks[i].armed) {
-            clear_track(i);
+    /* Count-in only when starting from stopped - if already playing, punch in immediately */
+    if (g_countin_enabled && g_transport == TRANSPORT_STOPPED) {
+        /* Start count-in phase - 4 beats before recording
+         * Count-in uses its own counter (playhead stays put)
+         * We snap to next beat boundary so count-in clicks are on the grid */
+        int beat_pos = g_playhead % g_samples_per_beat;
+        int samples_to_next_beat = (beat_pos == 0) ? 0 : (g_samples_per_beat - beat_pos);
+
+        g_countin_counter = -samples_to_next_beat;  /* Start negative to reach beat boundary */
+        g_countin_total_samples = 4 * g_samples_per_beat;  /* 4 full beats of count-in */
+        g_transport = TRANSPORT_COUNTIN;
+        ft_log("Count-in started (4 beats)");
+    } else {
+        /* Punch-in: just start recording at current playhead position.
+         * The recording code overwrites buffer at playhead and extends
+         * track.length only if we record past the current length. */
+        g_transport = TRANSPORT_RECORDING;
+        ft_log("Recording started (punch-in)");
+    }
+}
+
+/* Transition from count-in to actual recording */
+static void finish_countin(void) {
+    /* Snap playhead to beat boundary so recording metronome aligns with count-in grid.
+     * Count-in snapped to the next beat, so playhead should be at a beat boundary. */
+    if (g_samples_per_beat > 0) {
+        int beat_pos = g_playhead % g_samples_per_beat;
+        if (beat_pos != 0) {
+            g_playhead += g_samples_per_beat - beat_pos;
         }
     }
-    g_transport = TRANSPORT_RECORDING;
 
-    ft_log("Recording started");
+    /* Reset count-in state */
+    g_countin_counter = 0;
+    g_countin_total_samples = 0;
+
+    g_transport = TRANSPORT_RECORDING;
+    ft_log("Count-in complete, recording at beat boundary");
 }
 
 static void toggle_recording(void) {
@@ -934,38 +909,57 @@ static void update_metronome_timing(void) {
 }
 
 static void generate_metronome_click(int16_t *buffer, int frames) {
-    if (!g_metronome_enabled || g_transport == TRANSPORT_STOPPED) {
+    /* Safety check - need valid samples_per_beat for beat calculations */
+    if (g_samples_per_beat <= 0) {
+        return;
+    }
+
+    /* No metronome when stopped */
+    if (g_transport == TRANSPORT_STOPPED) {
         return;
     }
 
     for (int i = 0; i < frames; i++) {
-        if (g_metronome_counter >= g_samples_per_beat) {
-            g_metronome_counter = 0;
+        int beat_pos = -1;
+        int should_click = 0;
+
+        if (g_transport == TRANSPORT_COUNTIN) {
+            /* Check if count-in is complete BEFORE generating click */
+            if (g_countin_counter >= g_countin_total_samples) {
+                finish_countin();
+                /* Fall through to recording/playback handling below */
+            } else {
+                /* Still in count-in - use count-in counter */
+                if (g_countin_counter >= 0) {
+                    beat_pos = g_countin_counter % g_samples_per_beat;
+                }
+                should_click = 1;  /* Always click during count-in */
+                g_countin_counter++;
+            }
+        }
+        
+        /* Handle playback/recording - derive beat position directly from playhead */
+        if (g_transport == TRANSPORT_PLAYING || g_transport == TRANSPORT_RECORDING) {
+            /* Beat position = (playhead + sample offset) % samples_per_beat
+             * This ensures metronome is always aligned with the timeline */
+            beat_pos = (g_playhead + i) % g_samples_per_beat;
+            should_click = g_metronome_enabled;
         }
 
-        /* Generate a short click at the start of each beat */
-        if (g_metronome_counter < 200) {
-            /* Simple decaying sine wave click */
-            float t = (float)g_metronome_counter / 200.0f;
+        /* Generate click at beat start (first 200 samples of each beat) */
+        if (should_click && beat_pos >= 0 && beat_pos < 200) {
+            float t = (float)beat_pos / 200.0f;
             float env = 1.0f - t;
-            float click = sinf(g_metronome_counter * 0.15f) * env * 0.3f;
+            float click = sinf(beat_pos * 0.15f) * env * 0.3f;
             int16_t sample = (int16_t)(click * 32767.0f);
 
-            /* Mix into buffer (stereo) */
             int32_t l = buffer[i * 2] + sample;
             int32_t r = buffer[i * 2 + 1] + sample;
-
-            /* Clamp */
-            if (l > 32767) l = 32767;
-            if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767;
-            if (r < -32768) r = -32768;
-
+            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
             buffer[i * 2] = (int16_t)l;
             buffer[i * 2 + 1] = (int16_t)r;
         }
-
-        g_metronome_counter++;
     }
 }
 
@@ -1018,86 +1012,55 @@ static void plugin_on_unload(void) {
     ft_log("Four Track module unloaded");
 }
 
-static void synth_panic_for_track(track_t *track) {
-    /* Send all notes off on all channels */
+static void chain_panic_for_track(track_t *track) {
+    /* Send all notes off on all channels via chain instance */
+    if (!track->chain_plugin || !track->chain_instance) return;
+
     for (int ch = 0; ch < 16; ch++) {
         uint8_t msg[3] = {(uint8_t)(0xB0 | ch), 123, 0};  /* All notes off */
-
-        if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->on_midi) {
-            track->synth_plugin_v2->on_midi(track->synth_instance, msg, 3, MOVE_MIDI_SOURCE_INTERNAL);
-        } else if (track->synth_plugin && track->synth_plugin->on_midi) {
-            track->synth_plugin->on_midi(msg, 3, MOVE_MIDI_SOURCE_INTERNAL);
-        }
+        track->chain_plugin->on_midi(track->chain_instance, msg, 3, MOVE_MIDI_SOURCE_INTERNAL);
     }
 }
 
 /* Panic all tracks */
-static void synth_panic_all(void) {
+static void chain_panic_all(void) {
     for (int i = 0; i < NUM_TRACKS; i++) {
-        synth_panic_for_track(&g_tracks[i]);
+        chain_panic_for_track(&g_tracks[i]);
     }
 }
 
 static void plugin_on_midi(const uint8_t *msg, int len, int source) {
     if (len < 1) return;
 
-    /* Get selected track for knob mappings and MIDI routing */
-    track_t *track = &g_tracks[g_selected_track];
+    track_t *target_track = NULL;
 
-    /* Handle knob CC mappings (CC 71-78) - relative encoders */
-    if (len >= 3 && (msg[0] & 0xF0) == 0xB0) {
-        uint8_t cc = msg[1];
-        if (cc >= KNOB_CC_START && cc <= KNOB_CC_END) {
-            for (int i = 0; i < track->knob_mapping_count; i++) {
-                if (track->knob_mappings[i].cc == cc) {
-                    /* Relative encoder: 1 = increment, 127 = decrement */
-                    int is_int = (track->knob_mappings[i].type == KNOB_TYPE_INT);
-                    float delta = 0.0f;
-                    if (msg[2] == 1) {
-                        delta = is_int ? (float)KNOB_STEP_INT : KNOB_STEP_FLOAT;
-                    } else if (msg[2] == 127) {
-                        delta = is_int ? (float)(-KNOB_STEP_INT) : -KNOB_STEP_FLOAT;
-                    } else {
-                        /* For larger increments/decrements */
-                        if (msg[2] < 64) {
-                            delta = (is_int ? (float)KNOB_STEP_INT : KNOB_STEP_FLOAT) * msg[2];
-                        } else {
-                            delta = (is_int ? (float)(-KNOB_STEP_INT) : -KNOB_STEP_FLOAT) * (128 - msg[2]);
-                        }
-                    }
-
-                    /* Update current value with min/max clamping */
-                    float new_val = track->knob_mappings[i].current_value + delta;
-                    if (new_val < track->knob_mappings[i].min_val) new_val = track->knob_mappings[i].min_val;
-                    if (new_val > track->knob_mappings[i].max_val) new_val = track->knob_mappings[i].max_val;
-                    if (is_int) new_val = (float)((int)new_val);  /* Round to int */
-                    track->knob_mappings[i].current_value = new_val;
-
-                    /* Convert to string for set_param */
-                    char val_str[16];
-                    if (is_int) {
-                        snprintf(val_str, sizeof(val_str), "%d", (int)new_val);
-                    } else {
-                        snprintf(val_str, sizeof(val_str), "%.3f", new_val);
-                    }
-
-                    /* Route to track's synth (we only support synth target for now) */
-                    if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->set_param) {
-                        track->synth_plugin_v2->set_param(track->synth_instance, track->knob_mappings[i].param, val_str);
-                    } else if (track->synth_plugin && track->synth_plugin->set_param) {
-                        track->synth_plugin->set_param(track->knob_mappings[i].param, val_str);
-                    }
-                    return;  /* CC handled */
-                }
+    /* Determine target track based on routing mode and MIDI source */
+    if (source == MOVE_MIDI_SOURCE_INTERNAL) {
+        /* Internal MIDI (pads, buttons) always goes to selected track */
+        target_track = &g_tracks[g_selected_track];
+    } else if (source == MOVE_MIDI_SOURCE_EXTERNAL) {
+        /* External MIDI routing depends on mode */
+        if (g_midi_routing_mode == MIDI_ROUTING_SPLIT_CHANNELS) {
+            /* Split by MIDI channel: ch1 → track1, ch2 → track2, etc. */
+            uint8_t status = msg[0];
+            int channel = status & 0x0F;  /* Extract channel (0-15) */
+            if (channel < NUM_TRACKS) {
+                target_track = &g_tracks[channel];
             }
+            /* Channels 4-15 are ignored in split mode */
+        } else {
+            /* Default: all external MIDI to selected track */
+            target_track = &g_tracks[g_selected_track];
         }
+    } else {
+        /* Host-generated MIDI (clock, etc.) goes to selected track */
+        target_track = &g_tracks[g_selected_track];
     }
 
-    /* Forward MIDI to selected track's synth */
-    if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->on_midi) {
-        track->synth_plugin_v2->on_midi(track->synth_instance, msg, len, source);
-    } else if (track->synth_plugin && track->synth_plugin->on_midi) {
-        track->synth_plugin->on_midi(msg, len, source);
+    /* Forward MIDI to target track's chain instance */
+    if (target_track && target_track->chain_plugin &&
+        target_track->chain_instance && target_track->chain_plugin->on_midi) {
+        target_track->chain_plugin->on_midi(target_track->chain_instance, msg, len, source);
     }
 }
 
@@ -1217,6 +1180,29 @@ static void plugin_set_param(const char *key, const char *val) {
     else if (strcmp(key, "metronome") == 0) {
         g_metronome_enabled = atoi(val);
     }
+    else if (strcmp(key, "countin") == 0) {
+        g_countin_enabled = atoi(val);
+        ft_log(g_countin_enabled ? "Count-in enabled" : "Count-in disabled");
+    }
+    else if (strcmp(key, "midi_routing") == 0) {
+        if (strcmp(val, "split") == 0) {
+            g_midi_routing_mode = MIDI_ROUTING_SPLIT_CHANNELS;
+            ft_log("MIDI routing: split by channel (ch1→T1, ch2→T2, etc.)");
+        } else {
+            g_midi_routing_mode = MIDI_ROUTING_SELECTED;
+            ft_log("MIDI routing: all to selected track");
+        }
+    }
+    else if (strcmp(key, "toggle_midi_routing") == 0) {
+        /* Toggle between modes */
+        if (g_midi_routing_mode == MIDI_ROUTING_SELECTED) {
+            g_midi_routing_mode = MIDI_ROUTING_SPLIT_CHANNELS;
+            ft_log("MIDI routing: split by channel (ch1→T1, ch2→T2, etc.)");
+        } else {
+            g_midi_routing_mode = MIDI_ROUTING_SELECTED;
+            ft_log("MIDI routing: all to selected track");
+        }
+    }
     else if (strcmp(key, "loop_enabled") == 0) {
         g_loop_enabled = atoi(val);
     }
@@ -1229,7 +1215,21 @@ static void plugin_set_param(const char *key, const char *val) {
             /* Clear any previous error */
             g_last_error[0] = '\0';
 
-            /* Actually load and initialize the synth from the patch */
+            /* Ensure chain instance exists for this track */
+            if (!track->chain_instance) {
+                if (load_chain_for_track(track) != 0) {
+                    snprintf(g_last_error, sizeof(g_last_error), "Failed to create chain instance");
+                    snprintf(msg, sizeof(msg), "Track %d: failed to create chain instance",
+                             g_selected_track + 1);
+                    ft_log(msg);
+                    return;
+                }
+            }
+
+            /* Set patch name first (load_chain_patch_for_track uses it to find patch index) */
+            strncpy(track->patch_name, g_patches[patch_idx].name, MAX_NAME_LEN - 1);
+
+            /* Actually load and initialize the chain patch */
             int result = load_chain_patch_for_track(track, g_patches[patch_idx].path);
             if (result == 0) {
                 /* Only set patch name/path on success */
@@ -1253,21 +1253,21 @@ static void plugin_set_param(const char *key, const char *val) {
         }
     }
     else if (strcmp(key, "clear_patch") == 0) {
-        /* Clear patch from a track */
+        /* Clear patch from a track - unload entire chain and reload fresh */
         int track_idx = atoi(val);
         if (track_idx >= 0 && track_idx < NUM_TRACKS) {
             track_t *track = &g_tracks[track_idx];
             track->patch_name[0] = '\0';
             track->patch_path[0] = '\0';
-            /* Unload the synth for this track */
-            synth_panic_for_track(track);
-            unload_synth_for_track(track);
+            /* Panic and reload fresh chain (or could destroy/recreate instance) */
+            chain_panic_for_track(track);
+            track->chain_patch_idx = -1;
             snprintf(msg, sizeof(msg), "Track %d: patch cleared", track_idx + 1);
             ft_log(msg);
         }
     }
     else if (strcmp(key, "synth_param") == 0) {
-        /* Forward parameter to selected track's synth "key:val" */
+        /* Forward parameter to selected track's chain (which routes to synth) */
         track_t *track = &g_tracks[g_selected_track];
         char *colon = strchr(val, ':');
         if (colon) {
@@ -1277,10 +1277,11 @@ static void plugin_set_param(const char *key, const char *val) {
             strncpy(pkey, val, keylen);
             pkey[keylen] = '\0';
 
-            if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->set_param) {
-                track->synth_plugin_v2->set_param(track->synth_instance, pkey, colon + 1);
-            } else if (track->synth_plugin && track->synth_plugin->set_param) {
-                track->synth_plugin->set_param(pkey, colon + 1);
+            /* Route via "synth:" prefix to chain */
+            char chain_key[80];
+            snprintf(chain_key, sizeof(chain_key), "synth:%s", pkey);
+            if (track->chain_plugin && track->chain_instance && track->chain_plugin->set_param) {
+                track->chain_plugin->set_param(track->chain_instance, chain_key, colon + 1);
             }
         }
     }
@@ -1322,15 +1323,34 @@ static int plugin_get_param(const char *key, char *buf, int buf_len) {
             case TRANSPORT_STOPPED:   state = "stopped"; break;
             case TRANSPORT_PLAYING:   state = "playing"; break;
             case TRANSPORT_RECORDING: state = "recording"; break;
+            case TRANSPORT_COUNTIN:   state = "countin"; break;
             default:                  state = "unknown"; break;
         }
         return snprintf(buf, buf_len, "%s", state);
+    }
+    else if (strcmp(key, "countin") == 0) {
+        return snprintf(buf, buf_len, "%d", g_countin_enabled);
+    }
+    else if (strcmp(key, "countin_beats") == 0) {
+        /* Calculate beats remaining from counter */
+        int beats_remaining = 0;
+        if (g_transport == TRANSPORT_COUNTIN && g_samples_per_beat > 0) {
+            int remaining_samples = g_countin_total_samples - g_countin_counter;
+            if (remaining_samples > 0) {
+                beats_remaining = (remaining_samples + g_samples_per_beat - 1) / g_samples_per_beat;
+            }
+        }
+        return snprintf(buf, buf_len, "%d", beats_remaining);
     }
     else if (strcmp(key, "tempo") == 0) {
         return snprintf(buf, buf_len, "%d", g_tempo_bpm);
     }
     else if (strcmp(key, "metronome") == 0) {
         return snprintf(buf, buf_len, "%d", g_metronome_enabled);
+    }
+    else if (strcmp(key, "midi_routing") == 0) {
+        return snprintf(buf, buf_len, "%s",
+                        g_midi_routing_mode == MIDI_ROUTING_SPLIT_CHANNELS ? "split" : "selected");
     }
     else if (strcmp(key, "loop_enabled") == 0) {
         return snprintf(buf, buf_len, "%d", g_loop_enabled);
@@ -1382,16 +1402,17 @@ static int plugin_get_param(const char *key, char *buf, int buf_len) {
                     return snprintf(buf, buf_len, "%d", g_tracks[track].monitoring);
                 }
                 else if (strcmp(param, "synth_loaded") == 0) {
-                    int loaded = (g_tracks[track].synth_plugin != NULL || g_tracks[track].synth_instance != NULL);
+                    /* Check if chain instance has a patch loaded */
+                    int loaded = (g_tracks[track].chain_instance != NULL && g_tracks[track].chain_patch_idx >= 0);
                     return snprintf(buf, buf_len, "%d", loaded);
                 }
             }
         }
     }
     else if (strcmp(key, "synth_loaded") == 0) {
-        /* Check if selected track has a synth loaded */
+        /* Check if selected track has a chain with patch loaded */
         track_t *track = &g_tracks[g_selected_track];
-        int loaded = (track->synth_plugin != NULL || track->synth_instance != NULL);
+        int loaded = (track->chain_instance != NULL && track->chain_patch_idx >= 0);
         return snprintf(buf, buf_len, "%d", loaded);
     }
     else if (strcmp(key, "record_seconds") == 0) {
@@ -1400,53 +1421,13 @@ static int plugin_get_param(const char *key, char *buf, int buf_len) {
     else if (strcmp(key, "max_record_seconds") == 0) {
         return snprintf(buf, buf_len, "%d", MAX_RECORD_SECONDS);
     }
-    else if (strcmp(key, "knob_mapping_count") == 0) {
-        /* Return knob mapping count for selected track */
-        return snprintf(buf, buf_len, "%d", g_tracks[g_selected_track].knob_mapping_count);
-    }
-    else if (strncmp(key, "knob_", 5) == 0) {
-        /* knob_N_param format (N is 1-8 for knobs, mapping to CC 71-78) */
-        int knob_num;
-        char param[32];
-        if (sscanf(key + 5, "%d_%31s", &knob_num, param) == 2) {
-            /* Find mapping for this knob (CC = 70 + knob_num) in selected track */
-            track_t *track = &g_tracks[g_selected_track];
-            int cc = 70 + knob_num;
-            for (int i = 0; i < track->knob_mapping_count; i++) {
-                if (track->knob_mappings[i].cc == cc) {
-                    if (strcmp(param, "name") == 0) {
-                        return snprintf(buf, buf_len, "%s", track->knob_mappings[i].name);
-                    }
-                    else if (strcmp(param, "value") == 0) {
-                        if (track->knob_mappings[i].type == KNOB_TYPE_INT) {
-                            return snprintf(buf, buf_len, "%d", (int)track->knob_mappings[i].current_value);
-                        } else {
-                            return snprintf(buf, buf_len, "%.2f", track->knob_mappings[i].current_value);
-                        }
-                    }
-                    else if (strcmp(param, "min") == 0) {
-                        return snprintf(buf, buf_len, "%.2f", track->knob_mappings[i].min_val);
-                    }
-                    else if (strcmp(param, "max") == 0) {
-                        return snprintf(buf, buf_len, "%.2f", track->knob_mappings[i].max_val);
-                    }
-                    else if (strcmp(param, "type") == 0) {
-                        return snprintf(buf, buf_len, "%s",
-                                        track->knob_mappings[i].type == KNOB_TYPE_INT ? "int" : "float");
-                    }
-                    else if (strcmp(param, "percent") == 0) {
-                        float range = track->knob_mappings[i].max_val - track->knob_mappings[i].min_val;
-                        float pct = 0;
-                        if (range > 0) {
-                            pct = (track->knob_mappings[i].current_value - track->knob_mappings[i].min_val) / range * 100.0f;
-                        }
-                        return snprintf(buf, buf_len, "%d", (int)pct);
-                    }
-                    break;
-                }
-            }
+    else if (strcmp(key, "knob_mapping_count") == 0 || strncmp(key, "knob_", 5) == 0) {
+        /* Delegate knob queries to the chain instance for selected track */
+        track_t *track = &g_tracks[g_selected_track];
+        if (track->chain_plugin && track->chain_instance && track->chain_plugin->get_param) {
+            return track->chain_plugin->get_param(track->chain_instance, key, buf, buf_len);
         }
-        return -1;  /* Knob not mapped */
+        return -1;  /* No chain loaded */
     }
     else if (strcmp(key, "last_error") == 0) {
         return snprintf(buf, buf_len, "%s", g_last_error);
@@ -1456,20 +1437,18 @@ static int plugin_get_param(const char *key, char *buf, int buf_len) {
 }
 
 static void plugin_render_block(int16_t *out_interleaved_lr, int frames) {
-    int16_t synth_buffers[NUM_TRACKS][FRAMES_PER_BLOCK * 2];
+    int16_t chain_buffers[NUM_TRACKS][FRAMES_PER_BLOCK * 2];
     int32_t mix_buffer[FRAMES_PER_BLOCK * 2];
 
     /* Clear mix buffer */
     memset(mix_buffer, 0, sizeof(mix_buffer));
 
-    /* Render each track's synth */
+    /* Render each track's chain (synth + audio FX) */
     for (int t = 0; t < NUM_TRACKS; t++) {
-        memset(synth_buffers[t], 0, sizeof(synth_buffers[t]));
+        memset(chain_buffers[t], 0, sizeof(chain_buffers[t]));
         track_t *track = &g_tracks[t];
-        if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->render_block) {
-            track->synth_plugin_v2->render_block(track->synth_instance, synth_buffers[t], frames);
-        } else if (track->synth_plugin && track->synth_plugin->render_block) {
-            track->synth_plugin->render_block(synth_buffers[t], frames);
+        if (track->chain_plugin && track->chain_instance && track->chain_plugin->render_block) {
+            track->chain_plugin->render_block(track->chain_instance, chain_buffers[t], frames);
         }
     }
 
@@ -1477,13 +1456,13 @@ static void plugin_render_block(int16_t *out_interleaved_lr, int frames) {
     for (int t = 0; t < NUM_TRACKS; t++) {
         track_t *track = &g_tracks[t];
 
-        /* Recording: write track's synth output to its buffer if armed */
+        /* Recording: write track's chain output to its buffer if armed */
         if (g_transport == TRANSPORT_RECORDING && track->armed) {
             int write_pos = g_playhead * NUM_CHANNELS;
             int max_samples = g_record_seconds * SAMPLE_RATE * NUM_CHANNELS;
             for (int i = 0; i < frames && write_pos < max_samples - 1; i++) {
-                track->buffer[write_pos] = synth_buffers[t][i * 2];
-                track->buffer[write_pos + 1] = synth_buffers[t][i * 2 + 1];
+                track->buffer[write_pos] = chain_buffers[t][i * 2];
+                track->buffer[write_pos + 1] = chain_buffers[t][i * 2 + 1];
                 write_pos += 2;
             }
             /* Update track length */
@@ -1497,9 +1476,10 @@ static void plugin_render_block(int16_t *out_interleaved_lr, int frames) {
         if (track->muted) continue;
         if (g_any_solo && !track->solo) continue;
 
-        /* Playback: mix track audio into output (skip track being recorded) */
+        /* Playback: mix track audio into output (skip during count-in and for track being recorded) */
         int is_recording_this_track = (g_transport == TRANSPORT_RECORDING && track->armed);
-        if (track->length > 0 && g_transport != TRANSPORT_STOPPED && !is_recording_this_track) {
+        int is_playing_back = (g_transport == TRANSPORT_PLAYING || g_transport == TRANSPORT_RECORDING);
+        if (track->length > 0 && is_playing_back && !is_recording_this_track) {
             int read_pos = g_playhead * NUM_CHANNELS;
 
             for (int i = 0; i < frames; i++) {
@@ -1533,25 +1513,25 @@ static void plugin_render_block(int16_t *out_interleaved_lr, int frames) {
             }
         }
 
-        /* Monitor live synth output for this track if monitoring is enabled */
-        int has_synth = (track->synth_plugin != NULL || track->synth_instance != NULL);
-        if (track->monitoring && has_synth) {
+        /* Monitor live chain output for this track if monitoring is enabled */
+        int has_chain = (track->chain_instance != NULL && track->chain_patch_idx >= 0);
+        if (track->monitoring && has_chain) {
             float level = track->level;
             float pan = track->pan;
             float pan_l = (pan < 0) ? 1.0f : 1.0f - pan;
             float pan_r = (pan > 0) ? 1.0f : 1.0f + pan;
 
             for (int i = 0; i < frames; i++) {
-                int32_t l = (int32_t)(synth_buffers[t][i * 2] * level * pan_l);
-                int32_t r = (int32_t)(synth_buffers[t][i * 2 + 1] * level * pan_r);
+                int32_t l = (int32_t)(chain_buffers[t][i * 2] * level * pan_l);
+                int32_t r = (int32_t)(chain_buffers[t][i * 2 + 1] * level * pan_r);
                 mix_buffer[i * 2] += l;
                 mix_buffer[i * 2 + 1] += r;
             }
         }
     }
 
-    /* Advance playhead */
-    if (g_transport != TRANSPORT_STOPPED) {
+    /* Advance playhead (but not during count-in - playhead stays put) */
+    if (g_transport == TRANSPORT_PLAYING || g_transport == TRANSPORT_RECORDING) {
         g_playhead += frames;
 
         /* Loop handling */
