@@ -15,7 +15,7 @@ import { MoveBack, MoveMenu, MovePlay, MoveRec, MoveRecord, MoveShift,
          White, Black, BrightRed, BrightGreen, OrangeRed, Cyan, LightGrey,
          WhiteLedDim, WhiteLedBright } from '../../shared/constants.mjs';
 import { drawMenuHeader, drawMenuList, drawMenuFooter, menuLayoutDefaults,
-         showOverlay, tickOverlay, drawOverlay, isOverlayActive } from '../../shared/menu_layout.mjs';
+         showOverlay, tickOverlay, drawOverlay, isOverlayActive, dismissOverlayOnInput } from '../../shared/menu_layout.mjs';
 import { createTextScroller } from '../../shared/text_scroll.mjs';
 
 /* ============================================================================
@@ -784,7 +784,14 @@ function handleCC(cc, val) {
                 showOverlay("Cleared", `Track ${selectedTrack + 1}`);
             } else {
                 setParam("load_patch", String(patchIndex));
-                showOverlay("Loaded", patches[selectedPatch].name);
+                /* Check if load succeeded by checking for error */
+                const error = getParam("last_error");
+                if (error && error.length > 0) {
+                    showOverlay("Error", error);
+                    setParam("clear_error", "1");
+                } else {
+                    showOverlay("Loaded", patches[selectedPatch].name);
+                }
             }
             syncState();
             viewMode = VIEW_MAIN;
@@ -877,6 +884,12 @@ function onMidiMessage(msg, source) {
 
     /* Filter capacitive touch */
     if (isCapacitiveTouchMessage(msg)) return;
+
+    /* Dismiss overlay on user interaction */
+    if (dismissOverlayOnInput(msg)) {
+        needsRedraw = true;
+        return;  /* Consume this input just for dismissing */
+    }
 
     const status = msg[0] & 0xF0;
     const data1 = msg[1];

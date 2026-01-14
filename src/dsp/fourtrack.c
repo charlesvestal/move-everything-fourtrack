@@ -84,7 +84,9 @@ typedef struct {
     char patch_path[MAX_PATH_LEN];  /* Full path to patch file */
     /* Per-track synth */
     void *synth_handle;
-    plugin_api_v1_t *synth_plugin;
+    plugin_api_v1_t *synth_plugin;   /* v1 API (NULL if v2) */
+    plugin_api_v2_t *synth_plugin_v2; /* v2 API (NULL if v1) */
+    void *synth_instance;            /* v2 instance pointer (NULL if v1) */
     char synth_module[MAX_NAME_LEN];
     /* Per-track knob mappings */
     knob_mapping_t knob_mappings[MAX_KNOB_MAPPINGS];
@@ -139,6 +141,9 @@ static int g_project_loaded = 0;
 /* Solo tracking */
 static int g_any_solo = 0;
 
+/* Last error message (for UI display) */
+static char g_last_error[256] = "";
+
 /* ============================================================================
  * Logging
  * ============================================================================ */
@@ -180,9 +185,32 @@ static int subplugin_midi_send_external(const uint8_t *msg, int len) {
     return 0;
 }
 
+/* Find which track (if any) already has this module loaded as v1 */
+static int find_v1_module_in_use(const char *module_name, int exclude_track) {
+    for (int i = 0; i < NUM_TRACKS; i++) {
+        if (i == exclude_track) continue;
+        /* Only count v1 plugins (v2 allows multiple instances) */
+        if (g_tracks[i].synth_plugin != NULL && g_tracks[i].synth_plugin_v2 == NULL) {
+            if (strcmp(g_tracks[i].synth_module, module_name) == 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+/* Get track index from track pointer */
+static int get_track_index(track_t *track) {
+    for (int i = 0; i < NUM_TRACKS; i++) {
+        if (&g_tracks[i] == track) return i;
+    }
+    return -1;
+}
+
 static int load_synth_for_track(track_t *track, const char *module_path) {
     char msg[256];
     char dsp_path[MAX_PATH_LEN];
+    int track_idx = get_track_index(track);
 
     /* Build path to dsp.so */
     snprintf(dsp_path, sizeof(dsp_path), "%s/dsp.so", module_path);
@@ -198,24 +226,81 @@ static int load_synth_for_track(track_t *track, const char *module_path) {
         return -1;
     }
 
-    /* Get init function */
-    move_plugin_init_v1_fn init_fn = (move_plugin_init_v1_fn)dlsym(track->synth_handle, MOVE_PLUGIN_INIT_SYMBOL);
-    if (!init_fn) {
-        snprintf(msg, sizeof(msg), "dlsym failed: %s", dlerror());
+    /* Extract module name from path for duplicate checking */
+    char module_name[MAX_NAME_LEN] = "";
+    const char *last_slash = strrchr(module_path, '/');
+    if (last_slash) {
+        strncpy(module_name, last_slash + 1, MAX_NAME_LEN - 1);
+    } else {
+        strncpy(module_name, module_path, MAX_NAME_LEN - 1);
+    }
+
+    /* Try v2 first - supports multiple instances */
+    move_plugin_init_v2_fn init_v2 = (move_plugin_init_v2_fn)dlsym(track->synth_handle, MOVE_PLUGIN_INIT_V2_SYMBOL);
+    if (init_v2) {
+        snprintf(msg, sizeof(msg), "Plugin '%s' supports v2 API (multi-instance)", module_name);
+        ft_log(msg);
+
+        track->synth_plugin_v2 = init_v2(&g_subplugin_host_api);
+        if (!track->synth_plugin_v2) {
+            ft_log("Synth plugin v2 init returned NULL");
+            dlclose(track->synth_handle);
+            track->synth_handle = NULL;
+            return -1;
+        }
+
+        /* Create instance */
+        track->synth_instance = track->synth_plugin_v2->create_instance(module_path, NULL);
+        if (!track->synth_instance) {
+            ft_log("Synth create_instance returned NULL");
+            dlclose(track->synth_handle);
+            track->synth_handle = NULL;
+            track->synth_plugin_v2 = NULL;
+            return -1;
+        }
+
+        track->synth_plugin = NULL;  /* Not using v1 */
+        snprintf(msg, sizeof(msg), "Synth v2 loaded successfully (track %d)", track_idx + 1);
+        ft_log(msg);
+        return 0;
+    }
+
+    /* Fall back to v1 - single instance only */
+    move_plugin_init_v1_fn init_v1 = (move_plugin_init_v1_fn)dlsym(track->synth_handle, MOVE_PLUGIN_INIT_SYMBOL);
+    if (!init_v1) {
+        snprintf(msg, sizeof(msg), "dlsym failed (no v1 or v2 init): %s", dlerror());
         ft_log(msg);
         dlclose(track->synth_handle);
         track->synth_handle = NULL;
         return -1;
     }
 
-    /* Initialize sub-plugin */
-    track->synth_plugin = init_fn(&g_subplugin_host_api);
+    /* v1 plugin: check if already loaded on another track */
+    int existing_track = find_v1_module_in_use(module_name, track_idx);
+    if (existing_track >= 0) {
+        snprintf(msg, sizeof(msg),
+                 "ERROR: v1 plugin '%s' already in use on track %d (upgrade plugin for multi-instance)",
+                 module_name, existing_track + 1);
+        ft_log(msg);
+        dlclose(track->synth_handle);
+        track->synth_handle = NULL;
+        return -2;  /* Special error code for duplicate v1 */
+    }
+
+    snprintf(msg, sizeof(msg), "Plugin '%s' uses v1 API (single instance)", module_name);
+    ft_log(msg);
+
+    /* Initialize v1 sub-plugin */
+    track->synth_plugin = init_v1(&g_subplugin_host_api);
     if (!track->synth_plugin) {
         ft_log("Synth plugin init returned NULL");
         dlclose(track->synth_handle);
         track->synth_handle = NULL;
         return -1;
     }
+
+    track->synth_plugin_v2 = NULL;  /* Not using v2 */
+    track->synth_instance = NULL;
 
     /* Call on_load */
     if (track->synth_plugin->on_load) {
@@ -230,19 +315,32 @@ static int load_synth_for_track(track_t *track, const char *module_path) {
         }
     }
 
-    ft_log("Synth loaded successfully");
+    snprintf(msg, sizeof(msg), "Synth v1 loaded successfully (track %d)", track_idx + 1);
+    ft_log(msg);
     return 0;
 }
 
 static void unload_synth_for_track(track_t *track) {
-    if (track->synth_plugin && track->synth_plugin->on_unload) {
+    /* v2: destroy instance */
+    if (track->synth_plugin_v2 && track->synth_instance) {
+        if (track->synth_plugin_v2->destroy_instance) {
+            track->synth_plugin_v2->destroy_instance(track->synth_instance);
+        }
+        track->synth_instance = NULL;
+        track->synth_plugin_v2 = NULL;
+    }
+    /* v1: call on_unload */
+    else if (track->synth_plugin && track->synth_plugin->on_unload) {
         track->synth_plugin->on_unload();
     }
+
     if (track->synth_handle) {
         dlclose(track->synth_handle);
     }
     track->synth_handle = NULL;
     track->synth_plugin = NULL;
+    track->synth_plugin_v2 = NULL;
+    track->synth_instance = NULL;
     track->synth_module[0] = '\0';
 }
 
@@ -598,18 +696,21 @@ static int load_chain_patch_for_track(track_t *track, const char *patch_path) {
     synth_panic_for_track(track);
     unload_synth_for_track(track);
 
-    if (load_synth_for_track(track, synth_path) != 0) {
+    int load_result = load_synth_for_track(track, synth_path);
+    if (load_result != 0) {
         snprintf(msg, sizeof(msg), "Failed to load synth: %s", synth_module);
         ft_log(msg);
-        return -1;
+        return load_result;  /* Propagate error code (-2 for duplicate v1) */
     }
 
     strncpy(track->synth_module, synth_module, MAX_NAME_LEN - 1);
 
     /* Set preset */
-    if (track->synth_plugin && track->synth_plugin->set_param) {
-        char preset_str[16];
-        snprintf(preset_str, sizeof(preset_str), "%d", preset);
+    char preset_str[16];
+    snprintf(preset_str, sizeof(preset_str), "%d", preset);
+    if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->set_param) {
+        track->synth_plugin_v2->set_param(track->synth_instance, "preset", preset_str);
+    } else if (track->synth_plugin && track->synth_plugin->set_param) {
         track->synth_plugin->set_param("preset", preset_str);
     }
 
@@ -748,6 +849,8 @@ static void init_tracks(void) {
         g_tracks[i].patch_path[0] = '\0';
         g_tracks[i].synth_handle = NULL;
         g_tracks[i].synth_plugin = NULL;
+        g_tracks[i].synth_plugin_v2 = NULL;
+        g_tracks[i].synth_instance = NULL;
         g_tracks[i].synth_module[0] = '\0';
         g_tracks[i].knob_mapping_count = 0;
     }
@@ -916,12 +1019,15 @@ static void plugin_on_unload(void) {
 }
 
 static void synth_panic_for_track(track_t *track) {
-    if (!track->synth_plugin || !track->synth_plugin->on_midi) return;
-
     /* Send all notes off on all channels */
     for (int ch = 0; ch < 16; ch++) {
         uint8_t msg[3] = {(uint8_t)(0xB0 | ch), 123, 0};  /* All notes off */
-        track->synth_plugin->on_midi(msg, 3, MOVE_MIDI_SOURCE_INTERNAL);
+
+        if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->on_midi) {
+            track->synth_plugin_v2->on_midi(track->synth_instance, msg, 3, MOVE_MIDI_SOURCE_INTERNAL);
+        } else if (track->synth_plugin && track->synth_plugin->on_midi) {
+            track->synth_plugin->on_midi(msg, 3, MOVE_MIDI_SOURCE_INTERNAL);
+        }
     }
 }
 
@@ -976,7 +1082,9 @@ static void plugin_on_midi(const uint8_t *msg, int len, int source) {
                     }
 
                     /* Route to track's synth (we only support synth target for now) */
-                    if (track->synth_plugin && track->synth_plugin->set_param) {
+                    if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->set_param) {
+                        track->synth_plugin_v2->set_param(track->synth_instance, track->knob_mappings[i].param, val_str);
+                    } else if (track->synth_plugin && track->synth_plugin->set_param) {
                         track->synth_plugin->set_param(track->knob_mappings[i].param, val_str);
                     }
                     return;  /* CC handled */
@@ -986,7 +1094,9 @@ static void plugin_on_midi(const uint8_t *msg, int len, int source) {
     }
 
     /* Forward MIDI to selected track's synth */
-    if (track->synth_plugin && track->synth_plugin->on_midi) {
+    if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->on_midi) {
+        track->synth_plugin_v2->on_midi(track->synth_instance, msg, len, source);
+    } else if (track->synth_plugin && track->synth_plugin->on_midi) {
         track->synth_plugin->on_midi(msg, len, source);
     }
 }
@@ -1115,14 +1225,27 @@ static void plugin_set_param(const char *key, const char *val) {
         int patch_idx = atoi(val);
         if (patch_idx >= 0 && patch_idx < g_patch_count) {
             track_t *track = &g_tracks[g_selected_track];
-            strncpy(track->patch_name, g_patches[patch_idx].name, MAX_NAME_LEN - 1);
-            strncpy(track->patch_path, g_patches[patch_idx].path, MAX_PATH_LEN - 1);
+
+            /* Clear any previous error */
+            g_last_error[0] = '\0';
 
             /* Actually load and initialize the synth from the patch */
-            if (load_chain_patch_for_track(track, g_patches[patch_idx].path) == 0) {
+            int result = load_chain_patch_for_track(track, g_patches[patch_idx].path);
+            if (result == 0) {
+                /* Only set patch name/path on success */
+                strncpy(track->patch_name, g_patches[patch_idx].name, MAX_NAME_LEN - 1);
+                strncpy(track->patch_path, g_patches[patch_idx].path, MAX_PATH_LEN - 1);
                 snprintf(msg, sizeof(msg), "Track %d: loaded patch '%s'",
                          g_selected_track + 1, g_patches[patch_idx].name);
+            } else if (result == -2) {
+                /* v1 plugin already in use - set error for UI */
+                snprintf(g_last_error, sizeof(g_last_error),
+                         "'%s' in use on another track", g_patches[patch_idx].name);
+                snprintf(msg, sizeof(msg), "Track %d: '%s' already in use on another track (v1 plugin)",
+                         g_selected_track + 1, g_patches[patch_idx].name);
             } else {
+                snprintf(g_last_error, sizeof(g_last_error),
+                         "Failed to load '%s'", g_patches[patch_idx].name);
                 snprintf(msg, sizeof(msg), "Track %d: failed to load '%s'",
                          g_selected_track + 1, g_patches[patch_idx].name);
             }
@@ -1146,20 +1269,26 @@ static void plugin_set_param(const char *key, const char *val) {
     else if (strcmp(key, "synth_param") == 0) {
         /* Forward parameter to selected track's synth "key:val" */
         track_t *track = &g_tracks[g_selected_track];
-        if (track->synth_plugin && track->synth_plugin->set_param) {
-            char *colon = strchr(val, ':');
-            if (colon) {
-                char pkey[64];
-                int keylen = colon - val;
-                if (keylen > 63) keylen = 63;
-                strncpy(pkey, val, keylen);
-                pkey[keylen] = '\0';
+        char *colon = strchr(val, ':');
+        if (colon) {
+            char pkey[64];
+            int keylen = colon - val;
+            if (keylen > 63) keylen = 63;
+            strncpy(pkey, val, keylen);
+            pkey[keylen] = '\0';
+
+            if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->set_param) {
+                track->synth_plugin_v2->set_param(track->synth_instance, pkey, colon + 1);
+            } else if (track->synth_plugin && track->synth_plugin->set_param) {
                 track->synth_plugin->set_param(pkey, colon + 1);
             }
         }
     }
     else if (strcmp(key, "rescan_patches") == 0) {
         scan_patches();
+    }
+    else if (strcmp(key, "clear_error") == 0) {
+        g_last_error[0] = '\0';
     }
     else if (strcmp(key, "toggle_mute") == 0) {
         int track = atoi(val);
@@ -1253,14 +1382,17 @@ static int plugin_get_param(const char *key, char *buf, int buf_len) {
                     return snprintf(buf, buf_len, "%d", g_tracks[track].monitoring);
                 }
                 else if (strcmp(param, "synth_loaded") == 0) {
-                    return snprintf(buf, buf_len, "%d", g_tracks[track].synth_plugin ? 1 : 0);
+                    int loaded = (g_tracks[track].synth_plugin != NULL || g_tracks[track].synth_instance != NULL);
+                    return snprintf(buf, buf_len, "%d", loaded);
                 }
             }
         }
     }
     else if (strcmp(key, "synth_loaded") == 0) {
         /* Check if selected track has a synth loaded */
-        return snprintf(buf, buf_len, "%d", g_tracks[g_selected_track].synth_plugin ? 1 : 0);
+        track_t *track = &g_tracks[g_selected_track];
+        int loaded = (track->synth_plugin != NULL || track->synth_instance != NULL);
+        return snprintf(buf, buf_len, "%d", loaded);
     }
     else if (strcmp(key, "record_seconds") == 0) {
         return snprintf(buf, buf_len, "%d", g_record_seconds);
@@ -1316,6 +1448,9 @@ static int plugin_get_param(const char *key, char *buf, int buf_len) {
         }
         return -1;  /* Knob not mapped */
     }
+    else if (strcmp(key, "last_error") == 0) {
+        return snprintf(buf, buf_len, "%s", g_last_error);
+    }
 
     return -1;
 }
@@ -1331,7 +1466,9 @@ static void plugin_render_block(int16_t *out_interleaved_lr, int frames) {
     for (int t = 0; t < NUM_TRACKS; t++) {
         memset(synth_buffers[t], 0, sizeof(synth_buffers[t]));
         track_t *track = &g_tracks[t];
-        if (track->synth_plugin && track->synth_plugin->render_block) {
+        if (track->synth_plugin_v2 && track->synth_instance && track->synth_plugin_v2->render_block) {
+            track->synth_plugin_v2->render_block(track->synth_instance, synth_buffers[t], frames);
+        } else if (track->synth_plugin && track->synth_plugin->render_block) {
             track->synth_plugin->render_block(synth_buffers[t], frames);
         }
     }
@@ -1397,7 +1534,8 @@ static void plugin_render_block(int16_t *out_interleaved_lr, int frames) {
         }
 
         /* Monitor live synth output for this track if monitoring is enabled */
-        if (track->monitoring && track->synth_plugin) {
+        int has_synth = (track->synth_plugin != NULL || track->synth_instance != NULL);
+        if (track->monitoring && has_synth) {
             float level = track->level;
             float pan = track->pan;
             float pan_l = (pan < 0) ? 1.0f : 1.0f - pan;
