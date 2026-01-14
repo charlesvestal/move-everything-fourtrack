@@ -26,16 +26,15 @@
 #define FRAMES_PER_BLOCK 128
 #define NUM_CHANNELS 2
 
-/* Recording buffer: configurable seconds per track at 44.1kHz stereo
+/* Recording buffer: 5 minutes per track at 44.1kHz stereo
  * Memory usage: ~176KB per second per track (stereo int16)
- * 120s × 4 tracks = ~84MB, 300s × 4 = ~210MB
+ * 300s × 4 tracks = ~210MB
  */
-#define DEFAULT_RECORD_SECONDS 120
 #define MAX_RECORD_SECONDS 300  /* 5 minutes max per track */
 #define MAX_RECORD_SAMPLES (MAX_RECORD_SECONDS * SAMPLE_RATE)
 #define TRACK_BUFFER_SIZE (MAX_RECORD_SAMPLES * NUM_CHANNELS)
 
-static int g_record_seconds = DEFAULT_RECORD_SECONDS;
+static int g_record_seconds = MAX_RECORD_SECONDS;
 
 /* Path limits */
 #define MAX_PATH_LEN 512

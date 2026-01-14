@@ -195,8 +195,10 @@ To clear a track and start over:
 | Play/Stop | Play |
 | Toggle record mode | Record |
 | Arm/disarm track | Sample |
-| Jump to start | Left |
-| Jump to end | Right |
+| Jump backward (bars) | Left |
+| Jump forward (bars) | Right |
+| Jump to start | Shift + Left |
+| Jump to end | Shift + Right |
 | Mute track | Step 1-4 |
 | Solo track | Shift + Step 1-4 |
 | Synth macros | Knobs 1-8 (main view) |

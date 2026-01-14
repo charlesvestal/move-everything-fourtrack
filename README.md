@@ -56,8 +56,8 @@ See [docs/getting-started.md](docs/getting-started.md) for a detailed tutorial.
 | Sample | Arm/disarm selected track for recording |
 | Menu | Toggle Main/Mixer views |
 | Back | Return to previous view / exit module |
-| Left | Jump to start of track content |
-| Right | Jump to end of track content |
+| Left | Jump backward by bars (Shift: jump to start) |
+| Right | Jump forward by bars (Shift: jump to end) |
 | Knobs 1-8 | Synth macro controls (in Main view) |
 | Knobs 1-4 | Track levels (in Mixer view) |
 | Knobs 5-8 | Track pan (in Mixer view) |

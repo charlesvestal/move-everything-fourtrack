@@ -17,7 +17,7 @@ Four Track is a 4-track audio recorder module for Move Anything. It allows you t
 
 Four Track provides 4 independent audio tracks. Each track can:
 
-- Store up to 60 seconds of stereo audio at 44.1kHz
+- Store up to 5 minutes of stereo audio at 44.1kHz
 - Be associated with a Signal Chain patch (synth + effects)
 - Have its own level, pan, mute, and solo controls
 - Be armed for recording independently
@@ -61,29 +61,30 @@ The main view shows all 4 tracks with their status.
 
 **Transport:**
 - Play Button: Start/stop playback
-- Record Button: Toggle recording (requires armed track)
-- Shift + Record: Arm/disarm selected track
+- Record Button: Toggle record mode / punch in/out while playing
+- Sample Button: Arm/disarm selected track for recording
 
-**Track Functions (with Shift held):**
+**Track Functions:**
+- Tap selected track row: Open patch browser
 - Shift + Track Row: Arm track for recording
 - Step 1-4: Mute track 1-4
 - Shift + Step 1-4: Solo track 1-4
 
-**Tempo:**
-- Left/Right Arrows: Decrease/increase tempo by 1 BPM
-- Shift + Left/Right: Decrease/increase tempo by 10 BPM
+**Navigation:**
+- Left/Right Arrows: Jump backward/forward by bars
+- Shift + Left/Right: Jump to start/end of track content
 
 ### Patch View
 
-Access by pressing Menu from the main view.
+Access by tapping the currently selected track row button.
 
 - Jog Wheel: Navigate patch list
 - Jog Click: Load selected patch to current track
-- Back: Return to main view
+- Back or tap track again: Return to main view
 
 ### Mixer View
 
-Access by pressing Menu twice from the main view.
+Access by pressing Menu (toggles between Main and Mixer views).
 
 **Level Controls:**
 - Knobs 1-4: Adjust level for tracks 1-4
@@ -105,9 +106,12 @@ Access by pressing Menu twice from the main view.
 - Off: Stopped
 
 **Record LED:**
-- Red: Currently recording
-- White: A track is armed
-- Off: No track armed
+- Red: Recording, or record-ready mode enabled (when stopped)
+- White: Normal (not recording)
+
+**Sample LED:**
+- Red: Selected track is armed for recording
+- White: Selected track is not armed
 
 ## Parameters
 
@@ -136,13 +140,14 @@ Each track has the following adjustable parameters:
 ### Basic Recording Session
 
 1. Select Track 1
-2. Press Menu to open patch browser
+2. Tap Track 1 row button to open patch browser
 3. Select a synth patch and press Jog to load
-4. Press Shift + Record to arm Track 1 (LED turns red)
-5. Press Record to start recording
-6. Play your performance
-7. Press Record again to stop recording
-8. Press Play to review your take
+4. Press Sample button to arm Track 1 (Sample LED turns red)
+5. Press Record to enable record mode (Record LED turns red)
+6. Press Play to start recording
+7. Play your performance
+8. Press Play again to stop
+9. Press Play to review your take
 
 ### Overdubbing
 
