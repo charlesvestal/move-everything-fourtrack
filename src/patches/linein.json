@@ -1,0 +1,13 @@
+{
+    "name": "Line In",
+    "version": 1,
+    "chain": {
+        "input": "both",
+        "synth": {
+            "module": "linein",
+            "config": {}
+        },
+        "audio_fx": [],
+        "knob_mappings": []
+    }
+}

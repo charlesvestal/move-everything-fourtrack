@@ -11,7 +11,7 @@ import { isCapacitiveTouchMessage, setButtonLED, setLED, clearAllLEDs } from '..
 import { MoveBack, MoveMenu, MovePlay, MoveRec, MoveRecord, MoveShift,
          MoveUp, MoveDown, MoveLeft, MoveRight, MoveMainKnob, MoveMainButton,
          MoveRow1, MoveRow2, MoveRow3, MoveRow4, MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
-         MoveKnob5, MoveKnob6, MoveKnob7, MoveKnob8, MoveMaster,
+         MoveKnob5, MoveKnob6, MoveKnob7, MoveKnob8, MoveMaster, MoveCapture, MoveMute, MoveCopy,
          White, Black, BrightRed, BrightGreen, OrangeRed, Cyan, LightGrey,
          WhiteLedDim, WhiteLedBright } from '../../shared/constants.mjs';
 import { drawMenuHeader, drawMenuList, drawMenuFooter, menuLayoutDefaults,
@@ -40,6 +40,9 @@ const CC_UP = MoveUp;
 const CC_DOWN = MoveDown;
 const CC_LEFT = MoveLeft;
 const CC_RIGHT = MoveRight;
+const CC_CAPTURE = MoveCapture;
+const CC_MUTE = MoveMute;
+const CC_COPY = MoveCopy;
 
 /* Track row CCs (for track selection) */
 const TRACK_ROWS = [MoveRow1, MoveRow2, MoveRow3, MoveRow4];  /* Top to bottom, matches display */
@@ -67,7 +70,13 @@ const TRACK_COLORS = [
 const VIEW_MAIN = "main";
 const VIEW_PATCH = "patch";
 const VIEW_MIXER = "mixer";
+const VIEW_SETTINGS = "settings";
 let viewMode = VIEW_MAIN;
+
+/* Settings */
+const JUMP_OPTIONS = [1, 2, 4, 8];  /* Bars */
+let jumpBarsIndex = 0;  /* Index into JUMP_OPTIONS, default 1 bar */
+let settingsSelectedItem = 0;  /* 0=tempo, 1=jump, 2=metronome */
 
 /* Track state (synced from DSP) */
 let tracks = [];
@@ -77,13 +86,16 @@ for (let i = 0; i < NUM_TRACKS; i++) {
         pan: 0.0,
         muted: false,
         solo: false,
+        armed: false,
+        monitoring: true,
         length: 0,
         patch: "Empty"
     });
 }
 
 let selectedTrack = 0;
-let armedTrack = -1;
+let selectedRow = 0;  /* 0-3 = tracks, 4 = settings */
+const ROW_SETTINGS = 4;
 let transport = "stopped";
 let recordEnabled = false;  /* Record mode - when true, play will start recording */
 let tempo = 120;
@@ -101,6 +113,10 @@ let shiftHeld = false;
 let needsRedraw = true;
 let tickCount = 0;
 const REDRAW_INTERVAL = 6;
+
+/* Track button state for touch-up detection */
+let pressedTrack = -1;  /* Track button currently held down */
+let levelAdjustedWhileHeld = false;  /* True if level was changed while holding track */
 
 /* Text scroller for selected track's patch name */
 const patchNameScroller = createTextScroller();
@@ -121,7 +137,6 @@ function syncState() {
     /* Sync transport state */
     transport = getParam("transport") || "stopped";
     selectedTrack = parseInt(getParam("selected_track") || "0");
-    armedTrack = parseInt(getParam("armed_track") || "-1");
     tempo = parseInt(getParam("tempo") || "120");
     metronomeEnabled = getParam("metronome") === "1";
     loopEnabled = getParam("loop_enabled") === "1";
@@ -133,6 +148,8 @@ function syncState() {
         tracks[i].pan = parseFloat(getParam(`track_${i}_pan`) || "0.0");
         tracks[i].muted = getParam(`track_${i}_muted`) === "1";
         tracks[i].solo = getParam(`track_${i}_solo`) === "1";
+        tracks[i].armed = getParam(`track_${i}_armed`) === "1";
+        tracks[i].monitoring = getParam(`track_${i}_monitoring`) !== "0";  /* Default true */
         tracks[i].length = parseFloat(getParam(`track_${i}_length`) || "0");
         tracks[i].patch = getParam(`track_${i}_patch`) || "Empty";
     }
@@ -198,7 +215,7 @@ function updateLEDs() {
     /* Track row LEDs - green when selected, red when armed, white otherwise */
     for (let i = 0; i < NUM_TRACKS; i++) {
         let color = White;
-        if (i === armedTrack) {
+        if (tracks[i].armed) {
             color = BrightRed;
         } else if (i === selectedTrack) {
             color = BrightGreen;
@@ -222,7 +239,7 @@ function updateLEDs() {
     }
 
     /* Sample button (CC_RECORD) - red if selected track is armed, white otherwise */
-    if (armedTrack === selectedTrack && armedTrack >= 0) {
+    if (tracks[selectedTrack].armed) {
         setButtonLED(CC_RECORD, BrightRed);
     } else {
         setButtonLED(CC_RECORD, White);
@@ -238,6 +255,16 @@ function updateLEDs() {
     const atEnd = trackLengthMs > 0 && playheadMs >= trackLengthMs - 50;  /* 50ms tolerance */
     setButtonLED(CC_LEFT, atStart ? BrightGreen : White);
     setButtonLED(CC_RIGHT, atEnd ? BrightGreen : White);
+
+    /* Capture button - bright when selected track's monitoring is enabled */
+    setButtonLED(CC_CAPTURE, tracks[selectedTrack].monitoring ? WhiteLedBright : WhiteLedDim);
+
+    /* Mute button - bright when selected track is muted */
+    const selectedTrackMuted = tracks[selectedTrack]?.muted;
+    setButtonLED(CC_MUTE, selectedTrackMuted ? WhiteLedBright : WhiteLedDim);
+
+    /* Copy button - metronome toggle (bright when on) */
+    setButtonLED(CC_COPY, metronomeEnabled ? WhiteLedBright : WhiteLedDim);
 }
 
 /* ============================================================================
@@ -250,66 +277,93 @@ function drawMainView() {
     /* Header with transport info */
     const transportIcon = transport === "recording" ? "[REC]" :
                          transport === "playing" ? "[>]" : "[-]";
-    drawMenuHeader("Four Track", `${transportIcon} ${formatTime(playheadMs)}`);
+    const metroIcon = metronomeEnabled ? "[*]" : "";  /* Show [*] when metronome is ON */
+    drawMenuHeader("Four Track", `${metroIcon}${transportIcon} ${formatTime(playheadMs)}`);
 
-    /* Draw 4 track rows */
+    /* Calculate scroll offset - show 4 rows at a time */
     const trackHeight = 12;
     const startY = 15;
+    const visibleRows = 4;
 
-    for (let i = 0; i < NUM_TRACKS; i++) {
-        const y = startY + i * trackHeight;
-        const track = tracks[i];
-        const isSelected = i === selectedTrack;
-        const isArmed = i === armedTrack;
+    /* Scroll so selected row is visible */
+    let scrollOffset = 0;
+    if (selectedRow >= visibleRows) {
+        scrollOffset = selectedRow - visibleRows + 1;
+    }
 
-        /* Track indicator */
-        const prefix = isArmed ? "R" : isSelected ? ">" : " ";
+    /* Draw visible rows */
+    for (let rowIdx = 0; rowIdx < visibleRows; rowIdx++) {
+        const actualRow = rowIdx + scrollOffset;
+        const y = startY + rowIdx * trackHeight;
 
-        /* Level/Pan info (right side) - fixed width: "L:XX P:XXX" */
-        const levelVal = Math.min(99, Math.round(track.level * 100));
-        const levelStr = levelVal.toString().padStart(2, '0');
-        let panStr;
-        const panVal = Math.round(track.pan * 50);
-        if (panVal < -2) {
-            panStr = `L${(-panVal).toString().padStart(2, '0')}`;
-        } else if (panVal > 2) {
-            panStr = `R${panVal.toString().padStart(2, '0')}`;
-        } else {
-            panStr = "C00";
-        }
-        const lpInfo = `L:${levelStr} P:${panStr}`;
-        const lpInfoWidth = lpInfo.length * 6 + 4;
+        if (actualRow < NUM_TRACKS) {
+            /* Track row */
+            const track = tracks[actualRow];
+            const isSelected = actualRow === selectedRow;
 
-        /* Track name with patch - calculate available space */
-        const prefixWidth = 18;  /* "R " or "> " = 2 chars + space */
-        const availableWidth = SCREEN_WIDTH - prefixWidth - lpInfoWidth;
-        const maxChars = Math.floor(availableWidth / 6);
+            /* Track indicators: R for armed, M for monitoring, > for selected */
+            let prefix = isSelected ? ">" : " ";
+            if (track.armed) prefix = "R";
+            const monIcon = track.monitoring ? "M" : " ";
 
-        let fullName = `T${i + 1}`;
-        if (track.patch !== "Empty") {
-            fullName += `: ${track.patch}`;
-        }
+            /* Level/Pan info (right side) - fixed width: "L:XX P:XXX" */
+            const displayLevel = track.muted ? 0 : Math.min(99, Math.round(track.level * 100));
+            const levelStr = displayLevel.toString().padStart(2, '0');
+            let panStr;
+            const panVal = Math.round(track.pan * 50);
+            if (panVal < -2) {
+                panStr = `L${(-panVal).toString().padStart(2, '0')}`;
+            } else if (panVal > 2) {
+                panStr = `R${panVal.toString().padStart(2, '0')}`;
+            } else {
+                panStr = "C00";
+            }
+            const lpInfo = `L:${levelStr} P:${panStr}`;
+            const lpInfoWidth = lpInfo.length * 6 + 4;
 
-        let displayName;
-        if (isSelected && fullName.length > maxChars) {
-            /* Use scroller for selected track with long name */
-            patchNameScroller.setSelected(i);
-            displayName = patchNameScroller.getScrolledText(fullName, maxChars);
-        } else if (fullName.length > maxChars) {
-            /* Truncate non-selected tracks */
-            displayName = fullName.substring(0, maxChars - 2) + "..";
-        } else {
-            displayName = fullName;
-        }
+            /* Track name with patch - account for RM prefix */
+            const prefixWidth = 30;  /* "RM T1:" */
+            const availableWidth = SCREEN_WIDTH - prefixWidth - lpInfoWidth;
+            const maxChars = Math.floor(availableWidth / 6);
 
-        /* Draw row */
-        if (isSelected) {
-            fill_rect(0, y, SCREEN_WIDTH, trackHeight, 1);
-            print(2, y + 2, `${prefix} ${displayName}`, 0);
-            print(SCREEN_WIDTH - lpInfo.length * 6 - 2, y + 2, lpInfo, 0);
-        } else {
-            print(2, y + 2, `${prefix} ${displayName}`, 1);
-            print(SCREEN_WIDTH - lpInfo.length * 6 - 2, y + 2, lpInfo, 1);
+            let fullName = `T${actualRow + 1}`;
+            if (track.patch !== "Empty") {
+                fullName += `: ${track.patch}`;
+            }
+
+            let displayName;
+            if (isSelected && fullName.length > maxChars) {
+                patchNameScroller.setSelected(actualRow);
+                displayName = patchNameScroller.getScrolledText(fullName, maxChars);
+            } else if (fullName.length > maxChars) {
+                displayName = fullName.substring(0, maxChars - 2) + "..";
+            } else {
+                displayName = fullName;
+            }
+
+            /* Draw row */
+            if (isSelected) {
+                fill_rect(0, y, SCREEN_WIDTH, trackHeight, 1);
+                print(2, y + 2, `${prefix}${monIcon}${displayName}`, 0);
+                print(SCREEN_WIDTH - lpInfo.length * 6 - 2, y + 2, lpInfo, 0);
+            } else {
+                print(2, y + 2, `${prefix}${monIcon}${displayName}`, 1);
+                print(SCREEN_WIDTH - lpInfo.length * 6 - 2, y + 2, lpInfo, 1);
+            }
+        } else if (actualRow === ROW_SETTINGS) {
+            /* Settings row */
+            const isSelected = selectedRow === ROW_SETTINGS;
+            const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
+            const settingsInfo = `${tempo}bpm ${jumpBars}bar`;
+
+            if (isSelected) {
+                fill_rect(0, y, SCREEN_WIDTH, trackHeight, 1);
+                print(2, y + 2, "> Settings", 0);
+                print(SCREEN_WIDTH - settingsInfo.length * 6 - 2, y + 2, settingsInfo, 0);
+            } else {
+                print(2, y + 2, "  Settings", 1);
+                print(SCREEN_WIDTH - settingsInfo.length * 6 - 2, y + 2, settingsInfo, 1);
+            }
         }
     }
 
@@ -337,6 +391,39 @@ function drawPatchView() {
     drawOverlay();
 }
 
+function drawSettingsView() {
+    clear_screen();
+    drawMenuHeader("Settings", "");
+
+    const items = [
+        { label: "Tempo", value: `${tempo} BPM` },
+        { label: "Jump", value: `${JUMP_OPTIONS[jumpBarsIndex]} bar${JUMP_OPTIONS[jumpBarsIndex] > 1 ? 's' : ''}` },
+        { label: "Metronome", value: metronomeEnabled ? "On" : "Off" }
+    ];
+
+    const itemHeight = 14;
+    const startY = 16;
+
+    for (let i = 0; i < items.length; i++) {
+        const y = startY + i * itemHeight;
+        const isSelected = i === settingsSelectedItem;
+
+        if (isSelected) {
+            fill_rect(0, y, SCREEN_WIDTH, itemHeight, 1);
+            print(4, y + 3, items[i].label, 0);
+            print(SCREEN_WIDTH - items[i].value.length * 6 - 4, y + 3, items[i].value, 0);
+        } else {
+            print(4, y + 3, items[i].label, 1);
+            print(SCREEN_WIDTH - items[i].value.length * 6 - 4, y + 3, items[i].value, 1);
+        }
+    }
+
+    /* Instructions */
+    print(4, 58, "Jog:adjust  Back:done", 1);
+
+    drawOverlay();
+}
+
 function drawMixerView() {
     clear_screen();
 
@@ -352,24 +439,27 @@ function drawMixerView() {
         const faderX = channelX + (channelWidth - faderWidth) / 2;
         const track = tracks[i];
         const isSelected = i === selectedTrack;
-        const isArmed = i === armedTrack;
 
         /* Track number at top */
         const label = `${i + 1}`;
         print(channelX + 13, 0, label, 1);
 
-        /* Selection/arm indicator */
-        if (isArmed) {
+        /* Selection/arm/monitor indicators */
+        if (track.armed) {
             print(channelX + 2, 0, "R", 1);
         } else if (isSelected) {
             print(channelX + 2, 0, ">", 1);
+        }
+        if (track.monitoring) {
+            print(channelX + 8, 0, "M", 1);
         }
 
         /* Fader background */
         fill_rect(faderX, startY, faderWidth, faderHeight, 1);
 
-        /* Fader fill (from bottom) */
-        const fillHeight = Math.floor(track.level * (faderHeight - 2));
+        /* Fader fill (from bottom) - show 0 when muted */
+        const displayLevel = track.muted ? 0 : track.level;
+        const fillHeight = Math.floor(displayLevel * (faderHeight - 2));
         if (fillHeight > 0) {
             fill_rect(faderX + 1, startY + faderHeight - 1 - fillHeight, faderWidth - 2, fillHeight, 0);
         }
@@ -397,6 +487,9 @@ function draw() {
         case VIEW_MIXER:
             drawMixerView();
             break;
+        case VIEW_SETTINGS:
+            drawSettingsView();
+            break;
     }
 }
 
@@ -415,8 +508,9 @@ function handleCC(cc, val) {
     /* Transport controls */
     if (cc === CC_PLAY && val > 63) {
         if (transport === "stopped") {
-            /* If record mode enabled and a track is armed, start recording */
-            if (recordEnabled && armedTrack >= 0) {
+            /* If record mode enabled and any track is armed, start recording */
+            const anyArmed = tracks.some(t => t.armed);
+            if (recordEnabled && anyArmed) {
                 setParam("transport", "record");
             } else {
                 setParam("transport", "play");
@@ -439,47 +533,87 @@ function handleCC(cc, val) {
 
     if (cc === CC_RECORD && val > 63) {
         /* Toggle arm on selected track */
-        if (armedTrack === selectedTrack) {
-            setParam("arm_track", "-1");
-        } else {
-            setParam("arm_track", String(selectedTrack));
-        }
+        setParam("toggle_arm", String(selectedTrack));
         syncState();
+        showOverlay(`T${selectedTrack + 1}`, tracks[selectedTrack].armed ? "Disarmed" : "Armed");
         needsRedraw = true;
         return;
     }
 
-    /* Track row buttons */
+    /* Track row buttons - touch down */
     for (let i = 0; i < NUM_TRACKS; i++) {
-        if (cc === TRACK_ROWS[i] && val > 63) {
-            if (shiftHeld) {
-                /* Shift+Track = arm track */
-                setParam("arm_track", String(i));
-                syncState();
-            } else if (i === selectedTrack) {
-                /* Tap already-selected track = toggle patch browser */
-                if (viewMode === VIEW_PATCH) {
-                    viewMode = VIEW_MAIN;
-                } else {
-                    loadPatches();
-                    viewMode = VIEW_PATCH;
+        if (cc === TRACK_ROWS[i]) {
+            if (val > 63) {
+                /* Touch down */
+                if (shiftHeld) {
+                    /* Shift+Track = toggle arm on that track */
+                    setParam("toggle_arm", String(i));
+                    syncState();
+                    showOverlay(`T${i + 1}`, tracks[i].armed ? "Disarmed" : "Armed");
+                } else if (i !== selectedTrack) {
+                    /* Switch to different track = select it and return to main view */
+                    setParam("select_track", String(i));
+                    syncState();
+                    if (viewMode === VIEW_PATCH) {
+                        viewMode = VIEW_MAIN;
+                    }
                 }
+                /* Remember which track button is pressed */
+                pressedTrack = i;
+                needsRedraw = true;
             } else {
-                /* Switch to different track = select it and return to main view */
-                setParam("select_track", String(i));
-                syncState();
-                if (viewMode === VIEW_PATCH) {
-                    viewMode = VIEW_MAIN;
+                /* Touch up - open patch browser if releasing on selected track (and didn't adjust level) */
+                if (pressedTrack === selectedTrack && i === selectedTrack && !shiftHeld && !levelAdjustedWhileHeld) {
+                    if (viewMode === VIEW_PATCH) {
+                        viewMode = VIEW_MAIN;
+                    } else {
+                        loadPatches();
+                        viewMode = VIEW_PATCH;
+                    }
+                    needsRedraw = true;
                 }
+                pressedTrack = -1;
+                levelAdjustedWhileHeld = false;
             }
-            needsRedraw = true;
             return;
         }
     }
 
+    /* Capture button - toggle monitoring on selected track */
+    if (cc === CC_CAPTURE && val > 63) {
+        setParam("toggle_monitoring", String(selectedTrack));
+        syncState();
+        showOverlay(`T${selectedTrack + 1} Monitor`, tracks[selectedTrack].monitoring ? "Off" : "On");
+        needsRedraw = true;
+        return;
+    }
+
+    /* Mute button - toggle mute on selected track */
+    if (cc === CC_MUTE && val > 63) {
+        const wasMuted = tracks[selectedTrack].muted;
+        setParam("toggle_mute", String(selectedTrack));
+        syncState();
+        /* Show level going to 0 or back to actual level */
+        const newLevel = wasMuted ? Math.round(tracks[selectedTrack].level * 100) : 0;
+        showOverlay(`T${selectedTrack + 1} Level`, `${newLevel}%`);
+        needsRedraw = true;
+        return;
+    }
+
+    /* Copy button - toggle metronome */
+    if (cc === CC_COPY && val > 63) {
+        setParam("metronome", metronomeEnabled ? "0" : "1");
+        syncState();
+        showOverlay("Metronome", metronomeEnabled ? "Off" : "On");
+        needsRedraw = true;
+        return;
+    }
+
     /* Navigation */
     if (cc === CC_BACK && val > 63) {
-        if (viewMode !== VIEW_MAIN) {
+        if (viewMode === VIEW_SETTINGS) {
+            viewMode = VIEW_MAIN;
+        } else if (viewMode !== VIEW_MAIN) {
             viewMode = VIEW_MAIN;
         } else {
             host_return_to_menu();
@@ -499,38 +633,78 @@ function handleCC(cc, val) {
         return;
     }
 
-    /* Up/Down for track selection in main view */
+    /* Up/Down for row selection in main view */
     if (viewMode === VIEW_MAIN) {
         if (cc === CC_UP && val > 63) {
-            if (selectedTrack > 0) {
-                setParam("select_track", String(selectedTrack - 1));
-                syncState();
+            if (selectedRow > 0) {
+                selectedRow--;
+                if (selectedRow < NUM_TRACKS) {
+                    selectedTrack = selectedRow;
+                    setParam("select_track", String(selectedTrack));
+                    syncState();
+                }
                 needsRedraw = true;
             }
             return;
         }
         if (cc === CC_DOWN && val > 63) {
-            if (selectedTrack < NUM_TRACKS - 1) {
-                setParam("select_track", String(selectedTrack + 1));
-                syncState();
+            if (selectedRow < ROW_SETTINGS) {
+                selectedRow++;
+                if (selectedRow < NUM_TRACKS) {
+                    selectedTrack = selectedRow;
+                    setParam("select_track", String(selectedTrack));
+                    syncState();
+                }
                 needsRedraw = true;
             }
             return;
         }
 
-        /* Left = jump to start, Right = jump to end of track */
+        /* Left/Right = jump by bars, Shift+Left/Right = jump to start/end */
         if (cc === CC_LEFT && val > 63) {
-            setParam("goto_start", "1");
-            syncState();
-            showOverlay("Position", "Start");
+            if (shiftHeld) {
+                setParam("goto_start", "1");
+                syncState();
+                showOverlay("Position", "Start");
+            } else {
+                const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
+                setParam("jump_bars", String(-jumpBars));
+                syncState();
+                showOverlay("Jump", `-${jumpBars} bar${jumpBars > 1 ? 's' : ''}`);
+            }
             needsRedraw = true;
             return;
         }
         if (cc === CC_RIGHT && val > 63) {
-            setParam("goto_end", "1");
-            syncState();
-            showOverlay("Position", "End");
+            if (shiftHeld) {
+                setParam("goto_end", "1");
+                syncState();
+                showOverlay("Position", "End");
+            } else {
+                const jumpBars = JUMP_OPTIONS[jumpBarsIndex];
+                setParam("jump_bars", String(jumpBars));
+                syncState();
+                showOverlay("Jump", `+${jumpBars} bar${jumpBars > 1 ? 's' : ''}`);
+            }
             needsRedraw = true;
+            return;
+        }
+    }
+
+    /* Up/Down in settings view */
+    if (viewMode === VIEW_SETTINGS) {
+        if (cc === CC_UP && val > 63) {
+            if (settingsSelectedItem > 0) {
+                settingsSelectedItem--;
+                needsRedraw = true;
+            }
+            return;
+        }
+        if (cc === CC_DOWN && val > 63) {
+            if (settingsSelectedItem < 2) {
+                settingsSelectedItem++;
+                needsRedraw = true;
+            }
             return;
         }
     }
@@ -542,12 +716,35 @@ function handleCC(cc, val) {
         if (viewMode === VIEW_PATCH && patches.length > 0) {
             selectedPatch = (selectedPatch + delta + patches.length) % patches.length;
             needsRedraw = true;
-        } else if (viewMode === VIEW_MAIN) {
-            /* Jog = scroll through tracks */
-            const newTrack = selectedTrack + (delta > 0 ? 1 : -1);
-            if (newTrack >= 0 && newTrack < NUM_TRACKS) {
-                setParam("select_track", String(newTrack));
+        } else if (viewMode === VIEW_SETTINGS) {
+            /* Jog adjusts selected setting */
+            if (settingsSelectedItem === 0) {
+                /* Tempo: adjust by 1 BPM */
+                const newTempo = Math.max(20, Math.min(300, tempo + delta));
+                setParam("tempo", String(newTempo));
                 syncState();
+                showOverlay("Tempo", `${newTempo} BPM`);
+            } else if (settingsSelectedItem === 1) {
+                /* Jump increment: cycle through options */
+                jumpBarsIndex = (jumpBarsIndex + (delta > 0 ? 1 : -1) + JUMP_OPTIONS.length) % JUMP_OPTIONS.length;
+                showOverlay("Jump", `${JUMP_OPTIONS[jumpBarsIndex]} bars`);
+            } else if (settingsSelectedItem === 2) {
+                /* Metronome: toggle */
+                setParam("metronome", metronomeEnabled ? "0" : "1");
+                syncState();
+                showOverlay("Metronome", metronomeEnabled ? "Off" : "On");
+            }
+            needsRedraw = true;
+        } else if (viewMode === VIEW_MAIN) {
+            /* Jog = scroll through rows (tracks + settings) */
+            const newRow = selectedRow + (delta > 0 ? 1 : -1);
+            if (newRow >= 0 && newRow <= ROW_SETTINGS) {
+                selectedRow = newRow;
+                if (newRow < NUM_TRACKS) {
+                    selectedTrack = newRow;
+                    setParam("select_track", String(newRow));
+                    syncState();
+                }
                 needsRedraw = true;
             }
         }
@@ -557,10 +754,19 @@ function handleCC(cc, val) {
     /* Jog click */
     if (cc === CC_JOG_CLICK && val > 63) {
         if (viewMode === VIEW_MAIN) {
-            /* In main view: open patch browser for selected track */
-            loadPatches();
-            viewMode = VIEW_PATCH;
+            if (selectedRow === ROW_SETTINGS) {
+                /* Open settings view */
+                viewMode = VIEW_SETTINGS;
+                settingsSelectedItem = 0;
+            } else {
+                /* Open patch browser for selected track */
+                loadPatches();
+                viewMode = VIEW_PATCH;
+            }
             needsRedraw = true;
+        } else if (viewMode === VIEW_SETTINGS) {
+            /* In settings view: jog click does nothing or could confirm */
+            return;
         } else if (viewMode === VIEW_PATCH && patches.length > 0) {
             /* In patch view: load the selected patch and return to main */
             const patchIndex = patches[selectedPatch].index;
@@ -632,6 +838,10 @@ function handleCC(cc, val) {
         setParam("track_level", `${selectedTrack}:${newLevel.toFixed(2)}`);
         syncState();
         showOverlay(`T${selectedTrack + 1} Level`, `${Math.round(newLevel * 100)}%`);
+        /* Mark that level was adjusted while holding track button */
+        if (pressedTrack >= 0) {
+            levelAdjustedWhileHeld = true;
+        }
         needsRedraw = true;
         return;
     }

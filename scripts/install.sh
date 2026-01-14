@@ -27,6 +27,11 @@ ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p $MOVE_MODULES_DIR/fourtrack"
 echo "Copying files..."
 scp -r "$REPO_ROOT/dist/fourtrack/"* "$MOVE_USER@$MOVE_HOST:$MOVE_MODULES_DIR/fourtrack/"
 
+# Install Line In patch to chain/patches
+echo "Installing Line In patch..."
+ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p $MOVE_MODULES_DIR/chain/patches"
+scp "$REPO_ROOT/src/patches/linein.json" "$MOVE_USER@$MOVE_HOST:$MOVE_MODULES_DIR/chain/patches/"
+
 echo ""
 echo "=== Installation Complete ==="
 echo "Module installed to: $MOVE_MODULES_DIR/fourtrack"
