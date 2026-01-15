@@ -65,9 +65,16 @@ cat src/ui.js > dist/fourtrack/ui.js
 cat build/dsp.so > dist/fourtrack/dsp.so
 chmod +x dist/fourtrack/dsp.so
 
+# Create tarball for release
+echo "Creating tarball..."
+cd dist
+tar -czvf fourtrack-module.tar.gz fourtrack/
+cd ..
+
 echo ""
 echo "=== Build Complete ==="
 echo "Output: dist/fourtrack/"
+echo "Tarball: dist/fourtrack-module.tar.gz"
 echo ""
 echo "To install on Move:"
 echo "  ./scripts/install.sh"
