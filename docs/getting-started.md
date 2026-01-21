@@ -224,7 +224,7 @@ To clear a track and start over:
 
 **Patches not showing?**
 - Verify Signal Chain is installed
-- Check that patches exist in the chain/patches folder
+- Check that patches exist in the patches folder
 
 ## What's Next?
 

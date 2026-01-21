@@ -194,7 +194,7 @@ Each track has the following adjustable parameters:
 ### Patches Not Found
 
 - Ensure Signal Chain module is installed
-- Check that patches exist in `/data/UserData/move-anything/modules/chain/patches/`
+- Check that patches exist in `/data/UserData/move-anything/patches/`
 - Use Shift+Menu to rescan patches
 
 ## Version History

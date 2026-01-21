@@ -382,7 +382,7 @@ function drawPatchView() {
 
     if (patches.length === 0) {
         print(2, 30, "No patches found", 1);
-        print(2, 42, "Check chain/patches/", 1);
+        print(2, 42, "Check patches/", 1);
     } else {
         drawMenuList({
             items: patches,

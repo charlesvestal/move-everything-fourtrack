@@ -27,10 +27,10 @@ ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p $MOVE_MODULES_DIR/fourtrack"
 echo "Copying files..."
 scp -r "$REPO_ROOT/dist/fourtrack/"* "$MOVE_USER@$MOVE_HOST:$MOVE_MODULES_DIR/fourtrack/"
 
-# Install Line In patch to chain/patches
+# Install Line In patch to top-level patches directory
 echo "Installing Line In patch..."
-ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p $MOVE_MODULES_DIR/chain/patches"
-scp "$REPO_ROOT/src/patches/linein.json" "$MOVE_USER@$MOVE_HOST:$MOVE_MODULES_DIR/chain/patches/"
+ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p /data/UserData/move-anything/patches"
+scp "$REPO_ROOT/src/patches/linein.json" "$MOVE_USER@$MOVE_HOST:/data/UserData/move-anything/patches/"
 
 # Set permissions so Module Store can update later
 echo "Setting permissions..."

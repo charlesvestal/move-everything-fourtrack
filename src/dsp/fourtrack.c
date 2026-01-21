@@ -650,15 +650,15 @@ static void scan_patches(void) {
     char patches_dir[MAX_PATH_LEN];
     char msg[256];
 
-    /* Build path to chain patches directory */
-    /* Go up from fourtrack to modules, then to chain/patches */
+    /* Build path to patches directory */
+    /* Go up from fourtrack to modules, then up to patches/ at top level */
     strncpy(patches_dir, g_module_dir, sizeof(patches_dir) - 1);
     char *last_slash = strrchr(patches_dir, '/');
     if (last_slash) {
         snprintf(last_slash + 1, sizeof(patches_dir) - (last_slash - patches_dir) - 1,
-                 "chain/patches");
+                 "../patches");
     } else {
-        strncpy(patches_dir, "modules/chain/patches", sizeof(patches_dir) - 1);
+        strncpy(patches_dir, "patches", sizeof(patches_dir) - 1);
     }
 
     g_patch_count = 0;
