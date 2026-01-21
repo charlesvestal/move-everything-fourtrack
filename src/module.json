@@ -1,7 +1,7 @@
 {
     "id": "fourtrack",
     "name": "Four Track",
-    "version": "0.1.0",
+    "version": "0.3.0",
     "description": "Four-track recorder with signal chain integration",
     "author": "Move Anything",
     "ui": "ui.js",

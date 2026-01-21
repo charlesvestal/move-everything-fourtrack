@@ -19,13 +19,13 @@ if [ ! -d "$REPO_ROOT/dist/fourtrack" ]; then
     exit 1
 fi
 
-# Create module directory on Move
+# Create module directory on Move (utilities subdirectory for utility modules)
 echo "Creating module directory..."
-ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p $MOVE_MODULES_DIR/fourtrack"
+ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p $MOVE_MODULES_DIR/utilities/fourtrack"
 
 # Copy files
 echo "Copying files..."
-scp -r "$REPO_ROOT/dist/fourtrack/"* "$MOVE_USER@$MOVE_HOST:$MOVE_MODULES_DIR/fourtrack/"
+scp -r "$REPO_ROOT/dist/fourtrack/"* "$MOVE_USER@$MOVE_HOST:$MOVE_MODULES_DIR/utilities/fourtrack/"
 
 # Install Line In patch to top-level patches directory
 echo "Installing Line In patch..."
@@ -34,10 +34,10 @@ scp "$REPO_ROOT/src/patches/linein.json" "$MOVE_USER@$MOVE_HOST:/data/UserData/m
 
 # Set permissions so Module Store can update later
 echo "Setting permissions..."
-ssh "$MOVE_USER@$MOVE_HOST" "chmod -R a+rw $MOVE_MODULES_DIR/fourtrack"
+ssh "$MOVE_USER@$MOVE_HOST" "chmod -R a+rw $MOVE_MODULES_DIR/utilities/fourtrack"
 
 echo ""
 echo "=== Installation Complete ==="
-echo "Module installed to: $MOVE_MODULES_DIR/fourtrack"
+echo "Module installed to: $MOVE_MODULES_DIR/utilities/fourtrack"
 echo ""
 echo "Restart Move Anything to load the new module."

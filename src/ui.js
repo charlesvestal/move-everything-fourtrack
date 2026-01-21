@@ -7,20 +7,22 @@
 
 import * as std from 'std';
 import * as os from 'os';
-import { isCapacitiveTouchMessage, setButtonLED, setLED, clearAllLEDs } from '../../shared/input_filter.mjs';
+/* Shared utilities - use absolute path since module location may vary */
+const SHARED_DIR = '/data/UserData/move-anything/shared';
+import { isCapacitiveTouchMessage, setButtonLED, setLED, clearAllLEDs } from '/data/UserData/move-anything/shared/input_filter.mjs';
 import { MoveBack, MoveMenu, MovePlay, MoveRec, MoveRecord, MoveShift,
          MoveUp, MoveDown, MoveLeft, MoveRight, MoveMainKnob, MoveMainButton,
          MoveRow1, MoveRow2, MoveRow3, MoveRow4, MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob4,
          MoveKnob5, MoveKnob6, MoveKnob7, MoveKnob8, MoveMaster, MoveCapture, MoveMute, MoveCopy,
          White, Black, BrightRed, BrightGreen, OrangeRed, Cyan, LightGrey,
-         WhiteLedDim, WhiteLedBright } from '../../shared/constants.mjs';
+         WhiteLedDim, WhiteLedBright } from '/data/UserData/move-anything/shared/constants.mjs';
 import { drawMenuHeader, drawMenuList, drawMenuFooter, menuLayoutDefaults,
-         showOverlay, tickOverlay, drawOverlay, isOverlayActive, dismissOverlayOnInput } from '../../shared/menu_layout.mjs';
-import { createTextScroller } from '../../shared/text_scroll.mjs';
-import { createValue, createEnum, createToggle, createBack } from '../../shared/menu_items.mjs';
-import { createMenuState, handleMenuInput } from '../../shared/menu_nav.mjs';
-import { createMenuStack } from '../../shared/menu_stack.mjs';
-import { drawStackMenu } from '../../shared/menu_render.mjs';
+         showOverlay, tickOverlay, drawOverlay, isOverlayActive, dismissOverlayOnInput } from '/data/UserData/move-anything/shared/menu_layout.mjs';
+import { createTextScroller } from '/data/UserData/move-anything/shared/text_scroll.mjs';
+import { createValue, createEnum, createToggle, createBack } from '/data/UserData/move-anything/shared/menu_items.mjs';
+import { createMenuState, handleMenuInput } from '/data/UserData/move-anything/shared/menu_nav.mjs';
+import { createMenuStack } from '/data/UserData/move-anything/shared/menu_stack.mjs';
+import { drawStackMenu } from '/data/UserData/move-anything/shared/menu_render.mjs';
 
 /* ============================================================================
  * Constants

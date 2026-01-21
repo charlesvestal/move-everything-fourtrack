@@ -212,15 +212,9 @@ static int load_chain_for_track(track_t *track) {
     char chain_path[MAX_PATH_LEN];
     int track_idx = get_track_index(track);
 
-    /* Build path to chain module dsp.so */
-    strncpy(chain_path, g_module_dir, sizeof(chain_path) - 1);
-    char *last_slash = strrchr(chain_path, '/');
-    if (last_slash) {
-        snprintf(last_slash + 1, sizeof(chain_path) - (last_slash - chain_path) - 1,
-                 "chain/dsp.so");
-    } else {
-        snprintf(chain_path, sizeof(chain_path), "modules/chain/dsp.so");
-    }
+    /* Use absolute path to chain module */
+    snprintf(chain_path, sizeof(chain_path),
+             "/data/UserData/move-anything/modules/chain/dsp.so");
 
     snprintf(msg, sizeof(msg), "Loading chain from: %s", chain_path);
     ft_log(msg);
@@ -250,13 +244,10 @@ static int load_chain_for_track(track_t *track) {
         return -1;
     }
 
-    /* Build path to chain module directory */
+    /* Use absolute path to chain module directory */
     char chain_dir[MAX_PATH_LEN];
-    strncpy(chain_dir, g_module_dir, sizeof(chain_dir) - 1);
-    last_slash = strrchr(chain_dir, '/');
-    if (last_slash) {
-        snprintf(last_slash + 1, sizeof(chain_dir) - (last_slash - chain_dir) - 1, "chain");
-    }
+    snprintf(chain_dir, sizeof(chain_dir),
+             "/data/UserData/move-anything/modules/chain");
 
     /* Create chain instance */
     track->chain_instance = track->chain_plugin->create_instance(chain_dir, NULL);
@@ -650,16 +641,9 @@ static void scan_patches(void) {
     char patches_dir[MAX_PATH_LEN];
     char msg[256];
 
-    /* Build path to patches directory */
-    /* Go up from fourtrack to modules, then up to patches/ at top level */
-    strncpy(patches_dir, g_module_dir, sizeof(patches_dir) - 1);
-    char *last_slash = strrchr(patches_dir, '/');
-    if (last_slash) {
-        snprintf(last_slash + 1, sizeof(patches_dir) - (last_slash - patches_dir) - 1,
-                 "../patches");
-    } else {
-        strncpy(patches_dir, "patches", sizeof(patches_dir) - 1);
-    }
+    /* Use absolute path to patches directory */
+    strncpy(patches_dir, "/data/UserData/move-anything/patches", sizeof(patches_dir) - 1);
+    patches_dir[sizeof(patches_dir) - 1] = '\0';
 
     g_patch_count = 0;
 
