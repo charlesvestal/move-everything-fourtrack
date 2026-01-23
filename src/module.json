@@ -4,6 +4,7 @@
     "version": "0.3.0",
     "description": "Four-track recorder with signal chain integration",
     "author": "Move Anything",
+    "license": "MIT",
     "ui": "ui.js",
     "dsp": "dsp.so",
     "api_version": 1,
