@@ -1551,6 +1551,7 @@ static plugin_api_v1_t g_plugin_api = {
     .on_midi = plugin_on_midi,
     .set_param = plugin_set_param,
     .get_param = plugin_get_param,
+    .get_error = NULL,
     .render_block = plugin_render_block
 };
 

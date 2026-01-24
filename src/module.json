@@ -1,7 +1,7 @@
 {
     "id": "fourtrack",
     "name": "Four Track",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "description": "Four-track recorder with signal chain integration",
     "author": "Move Anything",
     "license": "MIT",
@@ -9,8 +9,8 @@
     "dsp": "dsp.so",
     "api_version": 1,
     "raw_ui": true,
+    "component_type": "utility",
     "capabilities": {
-        "claims_master_knob": true,
-        "component_type": "utility"
+        "claims_master_knob": true
     }
 }
