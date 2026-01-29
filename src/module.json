@@ -3,7 +3,7 @@
     "name": "Four Track",
     "version": "0.3.1",
     "description": "Four-track recorder with signal chain integration",
-    "author": "Move Anything",
+    "author": "charlesvestal",
     "license": "MIT",
     "ui": "ui.js",
     "dsp": "dsp.so",
