@@ -1,16 +1,16 @@
 {
-    "id": "fourtrack",
-    "name": "Four Track",
-    "version": "0.3.1",
-    "description": "Four-track recorder with signal chain integration",
-    "author": "charlesvestal",
-    "license": "MIT",
-    "ui": "ui.js",
-    "dsp": "dsp.so",
-    "api_version": 1,
-    "raw_ui": true,
-    "component_type": "utility",
-    "capabilities": {
-        "claims_master_knob": true
-    }
+  "id": "fourtrack",
+  "name": "Four Track",
+  "version": "0.3.2",
+  "description": "Four-track recorder with signal chain integration",
+  "author": "charlesvestal",
+  "license": "MIT",
+  "ui": "ui.js",
+  "dsp": "dsp.so",
+  "api_version": 1,
+  "raw_ui": true,
+  "component_type": "utility",
+  "capabilities": {
+    "claims_master_knob": true
+  }
 }
