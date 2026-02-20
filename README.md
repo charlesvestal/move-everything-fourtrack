@@ -1,6 +1,6 @@
 # Four Track
 
-A 4-track audio recorder module for Move Anything on Ableton Move.
+A 4-track audio recorder module for Move Everything on Ableton Move.
 
 ## Features
 
@@ -24,13 +24,13 @@ A 4-track audio recorder module for Move Anything on Ableton Move.
 
 ### Requirements
 
-- Move Anything installed on Move device
+- Move Everything installed on Move device
 - Docker (for cross-compilation)
 - SSH access to Move device
 
 ## Usage
 
-1. Select Four Track from the Move Anything menu
+1. Select Four Track from the Move Everything menu
 2. Tap a track row to open the patch browser
 3. Select a Signal Chain patch (or "(None)" to clear)
 4. Arm the track with the Sample button (turns red)
@@ -93,7 +93,7 @@ src/
   ui.js              # JavaScript UI (views, controls)
   dsp/
     fourtrack.c      # C DSP plugin (recording, playback, mixing)
-    plugin_api_v1.h  # Move Anything plugin API
+    plugin_api_v1.h  # Move Everything plugin API
 ```
 
 ## Technical Specs
@@ -109,4 +109,11 @@ MIT License - See LICENSE file
 
 ## Contributing
 
-Part of the Move Anything project. Contributions welcome!
+Part of the Move Everything project. Contributions welcome!
+
+## AI Assistance Disclaimer
+
+This module is part of Move Everything and was developed with AI assistance, including Claude, Codex, and other AI assistants.
+
+All architecture, implementation, and release decisions are reviewed by human maintainers.  
+AI-assisted content may still contain errors, so please validate functionality, security, and license compatibility before production use.
