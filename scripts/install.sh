@@ -8,7 +8,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 # Move connection settings
 MOVE_HOST="${MOVE_HOST:-move.local}"
 MOVE_USER="${MOVE_USER:-root}"
-MOVE_MODULES_DIR="/data/UserData/move-anything/modules"
+MOVE_MODULES_DIR="/data/UserData/schwung/modules"
 
 echo "=== Installing Four Track Module ==="
 echo "Target: $MOVE_USER@$MOVE_HOST"
@@ -29,8 +29,8 @@ scp -r "$REPO_ROOT/dist/fourtrack/"* "$MOVE_USER@$MOVE_HOST:$MOVE_MODULES_DIR/ut
 
 # Install Line In patch to top-level patches directory
 echo "Installing Line In patch..."
-ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p /data/UserData/move-anything/patches"
-scp "$REPO_ROOT/src/patches/linein.json" "$MOVE_USER@$MOVE_HOST:/data/UserData/move-anything/patches/"
+ssh "$MOVE_USER@$MOVE_HOST" "mkdir -p /data/UserData/schwung/patches"
+scp "$REPO_ROOT/src/patches/linein.json" "$MOVE_USER@$MOVE_HOST:/data/UserData/schwung/patches/"
 
 # Set permissions so Module Store can update later
 echo "Setting permissions..."

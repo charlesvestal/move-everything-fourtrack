@@ -214,7 +214,7 @@ static int load_chain_for_track(track_t *track) {
 
     /* Use absolute path to chain module */
     snprintf(chain_path, sizeof(chain_path),
-             "/data/UserData/move-anything/modules/chain/dsp.so");
+             "/data/UserData/schwung/modules/chain/dsp.so");
 
     snprintf(msg, sizeof(msg), "Loading chain from: %s", chain_path);
     ft_log(msg);
@@ -247,7 +247,7 @@ static int load_chain_for_track(track_t *track) {
     /* Use absolute path to chain module directory */
     char chain_dir[MAX_PATH_LEN];
     snprintf(chain_dir, sizeof(chain_dir),
-             "/data/UserData/move-anything/modules/chain");
+             "/data/UserData/schwung/modules/chain");
 
     /* Create chain instance */
     track->chain_instance = track->chain_plugin->create_instance(chain_dir, NULL);
@@ -642,7 +642,7 @@ static void scan_patches(void) {
     char msg[256];
 
     /* Use absolute path to patches directory */
-    strncpy(patches_dir, "/data/UserData/move-anything/patches", sizeof(patches_dir) - 1);
+    strncpy(patches_dir, "/data/UserData/schwung/patches", sizeof(patches_dir) - 1);
     patches_dir[sizeof(patches_dir) - 1] = '\0';
 
     g_patch_count = 0;
